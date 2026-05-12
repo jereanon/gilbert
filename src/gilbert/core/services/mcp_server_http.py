@@ -116,7 +116,7 @@ class MCPServerHttpApp:
             ai_svc = self._resolver.get_capability("ai")
             if not isinstance(ai_svc, AIToolDiscoveryProvider):
                 return []
-            user_ctx = _user_ctx_for(client)
+            user_ctx = _current_user.get(None) or _user_ctx_for(client)
             try:
                 discovered = ai_svc.discover_tools(
                     user_ctx=user_ctx,
@@ -150,7 +150,7 @@ class MCPServerHttpApp:
             ai_svc = self._resolver.get_capability("ai")
             if not isinstance(ai_svc, AIToolDiscoveryProvider):
                 return [_error_text("AI service unavailable")]
-            user_ctx = _user_ctx_for(client)
+            user_ctx = _current_user.get(None) or _user_ctx_for(client)
             try:
                 discovered = ai_svc.discover_tools(
                     user_ctx=user_ctx,

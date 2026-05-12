@@ -47,6 +47,7 @@ _PUBLIC_PREFIXES = (
     "/screens/stream",
     "/screens/tmp/",
     "/api/share/",
+    "/api/mcp",
     "/output/",
 )
 
