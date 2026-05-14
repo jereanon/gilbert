@@ -191,10 +191,10 @@ class InboxAIChatService(Service):
 
         sender_email = data.get("sender_email", "")
 
-        # When an email was forwarded through a Google Groups alias
-        # (e.g., vendors@current-la.com), Gmail sets X-Original-Sender
-        # to the true external sender.  Use that for the allowlist check
-        # so forwarded mail from external senders is correctly rejected.
+        # When an email was forwarded through a Google Groups alias,
+        # Gmail sets X-Original-Sender to the true external sender.
+        # Use that for the allowlist check so forwarded mail from
+        # external senders is correctly rejected.
         original_sender = data.get("original_sender", "")
         check_email = original_sender if original_sender else sender_email
 

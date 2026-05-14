@@ -178,7 +178,7 @@ class PresenceProvider(Protocol):
 class PresenceHistoryProvider(Protocol):
     """Protocol for querying recent-detection history from the presence service.
 
-    Other services (the greet tool, sales/notification cadence pickers,
+    Other services (the greet tool, notification cadence pickers,
     "when was X last around" lookups, etc.) call this instead of asking
     the backend directly so they get a consistent rolled-up view across
     every source the presence service has stored.
