@@ -14,6 +14,7 @@ import type {
 import type { GilbertEvent } from "@/types/events";
 import type { UIBlock } from "@/types/ui";
 import { ChatSidebarContent } from "./ChatSidebar";
+import { usePageSidebar } from "@/components/layout/PageSidebar";
 import { MessageList } from "./MessageList";
 import {
   ChatInput,
@@ -1037,6 +1038,11 @@ export function ChatPage() {
     onDelete: handleDelete,
   };
 
+  // Conversation list lives in the global SideNav — no second left
+  // column inside the page. On mobile, the same content surfaces via
+  // the SideNav's drawer (opened from the page's hamburger below).
+  usePageSidebar(<ChatSidebarContent {...sidebarProps} />);
+
   const chatTitle = isShared && roomTitle
     ? roomTitle
     : activeConvId
@@ -1045,12 +1051,8 @@ export function ChatPage() {
 
   return (
     <div className="flex h-full">
-      {/* Desktop sidebar */}
-      <div className="hidden md:flex w-64 shrink-0 border-r min-w-0 overflow-hidden">
-        <ChatSidebarContent {...sidebarProps} />
-      </div>
-
-      {/* Mobile sidebar sheet */}
+      {/* Mobile sidebar sheet — desktop renders into the global
+          SideNav via ``usePageSidebar`` above. */}
       <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
         <SheetContent side="left" className="w-72 p-0">
           <SheetHeader className="sr-only">

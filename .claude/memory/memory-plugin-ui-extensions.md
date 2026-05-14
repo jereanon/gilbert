@@ -52,9 +52,18 @@ Per-user / per-admin pages:
 - ``account.extensions`` — per-user Account page (``/account``).
 - ``settings.<category>`` — admin Settings page, scoped to a config category. Mount additional admin UI under your ``config_category``.
 
-Top nav bar:
+Top bar (slim header in the main content column):
 - ``header.widgets`` — between the connection indicator and the notification bell. Live-status widgets (sync indicator, queue depth, …).
 - ``header.user-menu`` — items in the avatar dropdown. Wrap each in a ``<DropdownMenuItem>``. OAuth connect / disconnect, identity-bound links.
+
+Side nav (contextual left sidebar):
+- ``sidebar.bottom`` — foot of the sidebar, below the nav list. Persistent widgets like now-playing, active-goal indicator, presence. Only renders when the sidebar itself is visible (i.e. a page override or an active group with children is showing).
+
+### Page-driven sidebar override (`usePageSidebar`)
+
+Pages — core or plugin — can take over the global `SideNav` while mounted by calling `usePageSidebar(<MyNav />)` from `@/components/layout/PageSidebar`. The published JSX replaces the section-children rendering for the duration of the page's mount. ChatPage publishes its room list this way; InboxPage publishes its mailbox folder list. A plugin route that owns its own primary nav (e.g. a documents browser, a deployment pipeline) does the exact same thing. No core change needed per plugin — the primitive is generic.
+
+The hook re-publishes on every render of the calling page, so derived state (current selection, filtered list) stays live in the sidebar without prop drilling. It returns `null` on unmount, restoring the default group-children rendering.
 
 Dashboard (``/``):
 - ``dashboard.top`` — banner widgets above the card grid.

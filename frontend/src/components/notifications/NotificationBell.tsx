@@ -67,7 +67,7 @@ function timeAgo(iso: string): string {
 
 /**
  * Bell icon with unread badge + dropdown of recent notifications.
- * Mounts in the NavBar's right-side cluster. Subscribes to
+ * Mounts in the TopBar's right-side cluster. Subscribes to
  * ``notification.received`` events for live updates and refetches the
  * list on receipt so urgency-driven UI cues stay in sync with storage.
  */

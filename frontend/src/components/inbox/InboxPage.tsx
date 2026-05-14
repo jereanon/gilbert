@@ -7,6 +7,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { MailboxSidebar } from "./MailboxSidebar";
+import { usePageSidebar } from "@/components/layout/PageSidebar";
 import { MailboxEditor } from "./MailboxEditor";
 import { MessageList } from "./MessageList";
 import { MessageDetailDialog } from "./MessageDetailDialog";
@@ -154,16 +155,20 @@ export function InboxPage() {
     setEditorOpen(true);
   };
 
-  return (
-    <div className="flex h-[calc(100vh-3.5rem)] flex-col sm:flex-row">
-      <MailboxSidebar
-        mailboxes={mailboxes}
-        selectedId={selectedId}
-        onSelect={handleSelectMailbox}
-        onCreate={() => handleOpenEditor(null)}
-        isAdmin={isAdmin}
-      />
+  // Mailbox list lives in the global SideNav — no second left column
+  // inside the page.
+  usePageSidebar(
+    <MailboxSidebar
+      mailboxes={mailboxes}
+      selectedId={selectedId}
+      onSelect={handleSelectMailbox}
+      onCreate={() => handleOpenEditor(null)}
+      isAdmin={isAdmin}
+    />,
+  );
 
+  return (
+    <div className="flex h-full flex-col">
       <main className="flex-1 overflow-y-auto">
         <div className="mx-auto max-w-5xl space-y-4 p-4 sm:p-6">
           {mailboxes.length === 0 ? (
