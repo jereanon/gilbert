@@ -413,6 +413,14 @@ class WebApiService(Service):
                         "required_role": "admin",
                     },
                     {
+                        "label": "Presence",
+                        "description": "Map detected presence signals to users",
+                        "url": "/presence",
+                        "icon": "user-check",
+                        "required_role": "admin",
+                        "requires_capability": "presence",
+                    },
+                    {
                         "label": "Restart",
                         "description": "Restart the Gilbert host process",
                         "icon": "rotate-ccw",

@@ -477,3 +477,280 @@ def test_config_params_includes_retention_and_timezone() -> None:
     keys = {p.key for p in svc.config_params()}
     assert "history_retention_days" in keys
     assert "timezone" in keys
+
+
+# --- Phase B: observations + mapping API ---------------------------
+
+
+from gilbert.interfaces.presence import PresenceObservation  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_upsert_observations_preserves_first_seen_and_mapping() -> None:
+    """A first sighting writes first_seen=now; a second poll bumps
+    last_seen and leaves first_seen + mapped_user_id alone."""
+    storage = _MemoryStorage()
+    svc = _make_svc(storage=storage, resolver=_Resolver({}))
+
+    await svc._upsert_observations(
+        [
+            PresenceObservation(
+                backend="unifi:protect",
+                thing_id="Brian",
+                label="Brian D",
+                kind="face",
+                first_seen="2026-05-14T08:00:00+00:00",
+                last_seen="2026-05-14T08:00:00+00:00",
+            ),
+        ]
+    )
+    # Admin maps it.
+    await svc.map_thing("unifi:protect", "Brian", "usr_brian")
+    # Second poll comes in.
+    await svc._upsert_observations(
+        [
+            PresenceObservation(
+                backend="unifi:protect",
+                thing_id="Brian",
+                label="Brian D",
+                kind="face",
+                first_seen="2026-05-14T09:00:00+00:00",
+                last_seen="2026-05-14T09:00:00+00:00",
+            ),
+        ]
+    )
+
+    row = await storage.get("presence_observations", "unifi:protect:Brian")
+    assert row is not None
+    assert row["first_seen"] == "2026-05-14T08:00:00+00:00"
+    assert row["last_seen"] == "2026-05-14T09:00:00+00:00"
+    assert row["mapped_user_id"] == "usr_brian"
+
+
+@pytest.mark.asyncio
+async def test_list_observations_filters_by_mapped_state() -> None:
+    storage = _MemoryStorage()
+    svc = _make_svc(storage=storage, resolver=_Resolver({}))
+    await svc._upsert_observations(
+        [
+            PresenceObservation(backend="unifi:protect", thing_id="A", kind="face"),
+            PresenceObservation(backend="unifi:network", thing_id="B", kind="wifi"),
+        ]
+    )
+    await svc.map_thing("unifi:protect", "A", "usr_a")
+
+    all_rows = await svc.list_observations()
+    mapped = await svc.list_observations(mapped=True)
+    unmapped = await svc.list_observations(mapped=False)
+
+    assert {r["thing_id"] for r in all_rows} == {"A", "B"}
+    assert {r["thing_id"] for r in mapped} == {"A"}
+    assert {r["thing_id"] for r in unmapped} == {"B"}
+
+
+@pytest.mark.asyncio
+async def test_map_thing_returns_none_for_unknown_observation() -> None:
+    svc = _make_svc(storage=_MemoryStorage(), resolver=_Resolver({}))
+    assert await svc.map_thing("unifi:protect", "ghost", "usr_x") is None
+
+
+@pytest.mark.asyncio
+async def test_relabel_thing_does_not_change_mapping() -> None:
+    storage = _MemoryStorage()
+    svc = _make_svc(storage=storage, resolver=_Resolver({}))
+    await svc._upsert_observations(
+        [PresenceObservation(backend="unifi:protect", thing_id="X", label="X", kind="face")]
+    )
+    await svc.map_thing("unifi:protect", "X", "usr_x")
+    relabeled = await svc.relabel_thing("unifi:protect", "X", "Mr. X")
+    assert relabeled is not None
+    assert relabeled["label"] == "Mr. X"
+    assert relabeled["mapped_user_id"] == "usr_x"
+
+
+@pytest.mark.asyncio
+async def test_map_thing_pushes_full_mapping_set_to_backend() -> None:
+    """After the admin maps an observation, the backend's
+    ``apply_thing_mappings`` hook is invoked with the full current
+    mapping set (not just the delta), so the backend can swap state
+    atomically rather than reconcile patches."""
+    storage = _MemoryStorage()
+
+    class _RecordingBackend:
+        def __init__(self) -> None:
+            self.applied: list[dict[str, str]] = []
+
+        async def apply_thing_mappings(self, mappings: dict[str, str]) -> None:
+            self.applied.append(dict(mappings))
+
+    svc = _make_svc(storage=storage, resolver=_Resolver({}))
+    backend = _RecordingBackend()
+    svc._backend = backend  # type: ignore[assignment]
+
+    await svc._upsert_observations(
+        [
+            PresenceObservation(backend="unifi:protect", thing_id="A", kind="face"),
+            PresenceObservation(backend="unifi:network", thing_id="B", kind="wifi"),
+        ]
+    )
+    await svc.map_thing("unifi:protect", "A", "usr_a")
+
+    assert backend.applied, "backend should have received apply_thing_mappings"
+    snap = backend.applied[-1]
+    # Both observation row ids are present; mapped one carries the
+    # user_id, the other carries an empty string.
+    assert snap["unifi:protect:A"] == "usr_a"
+    assert snap["unifi:network:B"] == ""
+
+
+# --- WS handler tests ----------------------------------------------
+
+
+def _admin_acl() -> Any:
+    """Stub AccessControlProvider where admin == level 0.
+
+    The Protocol declares several methods beyond ``get_role_level`` —
+    we stub them all so the runtime_checkable isinstance check passes,
+    even though only ``get_role_level`` is exercised by the WS gate.
+    """
+    from gilbert.interfaces.auth import AccessControlProvider
+
+    class _Acl:
+        def get_role_level(self, role: str) -> int:
+            return 0 if role == "admin" else 100
+
+        def get_effective_level(self, user_ctx: Any) -> int:
+            return 0
+
+        def resolve_rpc_level(self, frame_type: str) -> int:
+            return 100
+
+        def check_collection_read(self, user_ctx: Any, collection: str) -> bool:
+            return True
+
+        def check_collection_write(self, user_ctx: Any, collection: str) -> bool:
+            return True
+
+    acl = _Acl()
+    assert isinstance(acl, AccessControlProvider)
+    return acl
+
+
+class _Conn:
+    def __init__(self, user_level: int) -> None:
+        self.user_level = user_level
+
+
+@pytest.mark.asyncio
+async def test_ws_things_list_blocked_for_non_admin() -> None:
+    svc = _make_svc(
+        storage=_MemoryStorage(),
+        resolver=_Resolver({"access_control": _admin_acl()}),
+    )
+    result = await svc._ws_things_list(_Conn(user_level=100), {"id": "1"})
+    assert result is not None
+    assert result["type"] == "gilbert.error"
+    assert result["code"] == 403
+
+
+@pytest.mark.asyncio
+async def test_ws_things_list_returns_rows_for_admin() -> None:
+    storage = _MemoryStorage()
+    svc = _make_svc(
+        storage=storage,
+        resolver=_Resolver({"access_control": _admin_acl()}),
+    )
+    await svc._upsert_observations(
+        [PresenceObservation(backend="unifi:protect", thing_id="X", kind="face")]
+    )
+    result = await svc._ws_things_list(_Conn(user_level=0), {"id": "1"})
+    assert result is not None
+    assert result["type"] == "presence.things.list.result"
+    assert len(result["things"]) == 1
+    assert result["things"][0]["thing_id"] == "X"
+
+
+@pytest.mark.asyncio
+async def test_ws_things_list_filters_mapped() -> None:
+    storage = _MemoryStorage()
+    svc = _make_svc(
+        storage=storage,
+        resolver=_Resolver({"access_control": _admin_acl()}),
+    )
+    await svc._upsert_observations(
+        [
+            PresenceObservation(backend="unifi:protect", thing_id="A", kind="face"),
+            PresenceObservation(backend="unifi:network", thing_id="B", kind="wifi"),
+        ]
+    )
+    await svc.map_thing("unifi:protect", "A", "usr_a")
+    result = await svc._ws_things_list(
+        _Conn(user_level=0), {"id": "1", "mapped": False}
+    )
+    assert result is not None
+    things = result["things"]
+    assert len(things) == 1
+    assert things[0]["thing_id"] == "B"
+
+
+@pytest.mark.asyncio
+async def test_ws_things_map_validates_inputs_and_404() -> None:
+    svc = _make_svc(
+        storage=_MemoryStorage(),
+        resolver=_Resolver({"access_control": _admin_acl()}),
+    )
+    # Missing required fields.
+    bad = await svc._ws_things_map(_Conn(user_level=0), {"id": "1"})
+    assert bad is not None
+    assert bad["code"] == 400
+    # Unknown thing.
+    nope = await svc._ws_things_map(
+        _Conn(user_level=0),
+        {
+            "id": "2",
+            "backend": "unifi:protect",
+            "thing_id": "ghost",
+            "user_id": "usr_x",
+        },
+    )
+    assert nope is not None
+    assert nope["code"] == 404
+
+
+@pytest.mark.asyncio
+async def test_ws_things_unmap_round_trip() -> None:
+    storage = _MemoryStorage()
+    svc = _make_svc(
+        storage=storage,
+        resolver=_Resolver({"access_control": _admin_acl()}),
+    )
+    await svc._upsert_observations(
+        [PresenceObservation(backend="unifi:protect", thing_id="X", kind="face")]
+    )
+    await svc.map_thing("unifi:protect", "X", "usr_x")
+
+    result = await svc._ws_things_unmap(
+        _Conn(user_level=0),
+        {"id": "1", "backend": "unifi:protect", "thing_id": "X"},
+    )
+    assert result is not None
+    assert result["type"] == "presence.things.unmap.result"
+    assert result["thing"]["mapped_user_id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_ws_things_relabel_updates_label() -> None:
+    storage = _MemoryStorage()
+    svc = _make_svc(
+        storage=storage,
+        resolver=_Resolver({"access_control": _admin_acl()}),
+    )
+    await svc._upsert_observations(
+        [PresenceObservation(backend="unifi:protect", thing_id="X", label="X", kind="face")]
+    )
+    result = await svc._ws_things_relabel(
+        _Conn(user_level=0),
+        {"id": "1", "backend": "unifi:protect", "thing_id": "X", "label": "Marvelous X"},
+    )
+    assert result is not None
+    assert result["thing"]["label"] == "Marvelous X"

@@ -28,6 +28,50 @@ class UserPresence:
 
 
 @dataclass(frozen=True)
+class PresenceObservation:
+    """A raw entity the presence backend has detected.
+
+    One row per stable "thing" the backend recognizes — a UniFi face
+    name, an access-badge holder, a Wi-Fi device hostname or MAC, a BLE
+    beacon id, etc. Observations are surfaced unmapped (no associated
+    user_id) until an admin maps them to a Gilbert user via the
+    presence-mapping screen.
+
+    The presence service merges incoming observations into the
+    ``presence_observations`` collection, preserving the
+    ``mapped_user_id`` set by the UI across polls and bumping
+    ``last_seen`` as the backend keeps reporting the same thing.
+
+    Fields:
+
+    - ``backend``: stable identifier for the backend that produced this
+      observation (e.g. ``"unifi:protect"``, ``"unifi:access"``,
+      ``"unifi:network"``). Combined with ``thing_id`` it forms the
+      composite primary key in storage.
+    - ``thing_id``: the backend's internal identifier for the thing
+      (e.g. a face name, MAC, badge id, BLE address). Must be stable
+      across polls so the upsert can find the prior row.
+    - ``label``: human-readable label for the mapping screen. Backends
+      should send the best-effort display name they know about.
+    - ``kind``: rough category (``"face"``, ``"badge"``, ``"wifi"``,
+      ``"ble"``, …). Used by the UI to group / icon the rows.
+    - ``last_seen`` / ``first_seen``: ISO 8601 timestamps; the service
+      preserves ``first_seen`` across polls and bumps ``last_seen``
+      every time the same observation comes in again.
+    - ``signal_strength``: optional 0.0-1.0 confidence/RSSI-normalized
+      value if the backend has one; ``None`` otherwise.
+    """
+
+    backend: str
+    thing_id: str
+    label: str = ""
+    kind: str = ""
+    first_seen: str = ""
+    last_seen: str = ""
+    signal_strength: float | None = None
+
+
+@dataclass(frozen=True)
 class PresenceDetection:
     """One day's worth of detections for a single user from a single source.
 
@@ -93,6 +137,32 @@ class PresenceBackend(ABC):
     async def list_tracked_users(self) -> list[str]:
         """List user IDs that this backend is tracking."""
         ...
+
+    async def get_observations(self) -> list["PresenceObservation"]:
+        """Return raw observations (mapped + unmapped things) the backend
+        has detected this cycle.
+
+        Default implementation returns an empty list so backends that
+        haven't yet been retrofitted for the mapping screen keep
+        working — they continue to drive ``UserPresence`` exclusively
+        through ``get_all_presence``. Backends that opt in should
+        override this and yield one ``PresenceObservation`` per stable
+        thing they recognize, regardless of whether a user mapping
+        exists.
+        """
+        return []
+
+    async def apply_thing_mappings(self, mappings: dict[str, str]) -> None:
+        """Adopt admin-edited mappings from the presence service.
+
+        ``mappings`` is a dict of ``f"{backend}:{thing_id}" -> user_id``
+        (or ``""`` to unmap). The presence service calls this whenever
+        the mapping store changes so the backend's internal name /
+        device resolver can reflect the new authoritative pairing on
+        the next poll. Default is a no-op so legacy backends keep
+        functioning unchanged.
+        """
+        return None
 
 
 @runtime_checkable

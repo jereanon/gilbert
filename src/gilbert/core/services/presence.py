@@ -26,6 +26,7 @@ from gilbert.interfaces.events import Event, EventBus, EventBusProvider
 from gilbert.interfaces.presence import (
     PresenceBackend,
     PresenceDetection,
+    PresenceObservation,
     PresenceState,
     UserPresence,
 )
@@ -72,7 +73,9 @@ class PresenceService(Service):
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="presence",
-            capabilities=frozenset({"presence", "presence_history", "ai_tools"}),
+            capabilities=frozenset(
+                {"presence", "presence_history", "ai_tools", "ws_handlers"}
+            ),
             requires=frozenset({"users", "scheduler"}),
             optional=frozenset({"configuration", "event_bus", "credentials", "entity_storage"}),
             events=frozenset({"presence.arrived", "presence.departed"}),
@@ -322,6 +325,17 @@ class PresenceService(Service):
         # a single bounded query.
         await self._record_detection_history(currently_here)
 
+        # 8. Capture raw observations for the mapping screen. Backends
+        # that haven't been retrofitted return an empty list, so this
+        # is a no-op for them.
+        try:
+            observations = await self._backend.get_observations()
+        except Exception:
+            logger.warning("Failed to read observations from backend", exc_info=True)
+            observations = []
+        if observations:
+            await self._upsert_observations(observations)
+
         self._first_poll = False
 
     async def _emit_arrived(self, presence: UserPresence) -> None:
@@ -361,6 +375,152 @@ class PresenceService(Service):
 
     _COLLECTION = "user_presence"
     _HISTORY_COLLECTION = "presence_detections"
+    _OBSERVATIONS_COLLECTION = "presence_observations"
+
+    @staticmethod
+    def _observation_row_id(backend: str, thing_id: str) -> str:
+        """Composite key for an observation row. The colon delimiter
+        matches the backend-id convention (``"unifi:protect"`` etc.)
+        and ensures uniqueness across backends with overlapping
+        thing_id namespaces."""
+        return f"{backend}:{thing_id}"
+
+    async def _upsert_observations(
+        self,
+        observations: list[PresenceObservation],
+    ) -> None:
+        """Merge incoming observations into storage, preserving the
+        ``mapped_user_id`` set by the mapping UI and rolling first_seen
+        forward only on the very first sighting.
+
+        Backends only need to know "what did I see this poll" — the
+        service owns the persistent mapping pivot so admins can edit
+        it independently of any single backend's internal state.
+        """
+        if self._storage is None:
+            return
+        from datetime import datetime
+
+        now_iso = datetime.now(UTC).isoformat()
+        for obs in observations:
+            if not obs.backend or not obs.thing_id:
+                continue
+            row_id = self._observation_row_id(obs.backend, obs.thing_id)
+            existing = await self._storage.get(self._OBSERVATIONS_COLLECTION, row_id) or {}
+            first_seen = existing.get("first_seen") or obs.first_seen or now_iso
+            last_seen = obs.last_seen or now_iso
+            await self._storage.put(
+                self._OBSERVATIONS_COLLECTION,
+                row_id,
+                {
+                    "backend": obs.backend,
+                    "thing_id": obs.thing_id,
+                    "label": obs.label or existing.get("label", ""),
+                    "kind": obs.kind or existing.get("kind", ""),
+                    "first_seen": first_seen,
+                    "last_seen": last_seen,
+                    "signal_strength": (
+                        obs.signal_strength
+                        if obs.signal_strength is not None
+                        else existing.get("signal_strength")
+                    ),
+                    # Mapping pivot — only the mapping API writes here,
+                    # so polling never clobbers an admin-edited value.
+                    "mapped_user_id": existing.get("mapped_user_id", ""),
+                },
+            )
+
+    async def list_observations(
+        self,
+        *,
+        mapped: bool | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return every observation we've seen, optionally filtered to
+        only mapped (``True``) or only unmapped (``False``) rows.
+
+        Rows are sorted by ``last_seen`` descending so the mapping UI
+        surfaces fresh things first.
+        """
+        if self._storage is None:
+            return []
+        from gilbert.interfaces.storage import Query
+
+        try:
+            rows = await self._storage.query(Query(collection=self._OBSERVATIONS_COLLECTION))
+        except Exception:
+            logger.warning("Failed to list observations", exc_info=True)
+            return []
+        if mapped is True:
+            rows = [r for r in rows if r.get("mapped_user_id")]
+        elif mapped is False:
+            rows = [r for r in rows if not r.get("mapped_user_id")]
+        rows.sort(key=lambda r: r.get("last_seen", ""), reverse=True)
+        return rows
+
+    async def map_thing(
+        self,
+        backend: str,
+        thing_id: str,
+        user_id: str,
+    ) -> dict[str, Any] | None:
+        """Map an observation to a Gilbert user_id (or ``""`` to unmap).
+
+        Returns the updated row, or ``None`` if no such observation
+        exists. Also pushes the new mapping down to the live backend
+        via ``apply_thing_mappings`` so the next poll uses it without
+        a restart.
+        """
+        if self._storage is None or not backend or not thing_id:
+            return None
+        row_id = self._observation_row_id(backend, thing_id)
+        existing = await self._storage.get(self._OBSERVATIONS_COLLECTION, row_id)
+        if not existing:
+            return None
+        existing["mapped_user_id"] = user_id
+        await self._storage.put(self._OBSERVATIONS_COLLECTION, row_id, existing)
+        await self._notify_backend_of_mapping_change()
+        return existing
+
+    async def relabel_thing(
+        self,
+        backend: str,
+        thing_id: str,
+        label: str,
+    ) -> dict[str, Any] | None:
+        """Admin-edited human-readable label for the mapping screen.
+
+        Doesn't affect identity / mapping — purely cosmetic. Returns
+        the updated row or ``None`` if the observation doesn't exist.
+        """
+        if self._storage is None or not backend or not thing_id:
+            return None
+        row_id = self._observation_row_id(backend, thing_id)
+        existing = await self._storage.get(self._OBSERVATIONS_COLLECTION, row_id)
+        if not existing:
+            return None
+        existing["label"] = label
+        await self._storage.put(self._OBSERVATIONS_COLLECTION, row_id, existing)
+        return existing
+
+    async def _notify_backend_of_mapping_change(self) -> None:
+        """Push the full current mapping set down to the backend.
+
+        Sent as a single dict so the backend can swap state atomically
+        rather than receive a stream of patches. Backends that don't
+        implement the optional hook (default no-op on the ABC) are
+        unaffected.
+        """
+        if self._backend is None or self._storage is None:
+            return
+        try:
+            rows = await self.list_observations()
+            mappings = {
+                self._observation_row_id(r["backend"], r["thing_id"]): r.get("mapped_user_id", "")
+                for r in rows
+            }
+            await self._backend.apply_thing_mappings(mappings)
+        except Exception:
+            logger.warning("Failed to push mapping changes to backend", exc_info=True)
 
     def _today_str(self) -> str:
         """Calendar date in the configured timezone — used as the bucket
@@ -864,4 +1024,160 @@ class PresenceService(Service):
             "state": p.state.value,
             "since": p.since,
             "source": p.source,
+        }
+
+    # --- WsHandlerProvider protocol ---
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        return {
+            "presence.things.list": self._ws_things_list,
+            "presence.things.map": self._ws_things_map,
+            "presence.things.unmap": self._ws_things_unmap,
+            "presence.things.relabel": self._ws_things_relabel,
+        }
+
+    def _require_admin(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
+        """Return a 403 error frame if conn isn't an admin, else None.
+
+        Resolves the admin level through the access-control capability
+        so a custom RBAC backend can rename / re-rank the role without
+        touching every WS handler — the same gating pattern the config
+        service uses.
+        """
+        if self._resolver is None:
+            return None
+        acl = self._resolver.get_capability("access_control")
+        from gilbert.interfaces.auth import AccessControlProvider
+
+        if not isinstance(acl, AccessControlProvider):
+            return None
+        required_level = acl.get_role_level("admin")
+        user_level = getattr(conn, "user_level", 999)
+        if user_level > required_level:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Admin role required to manage presence mappings",
+                "code": 403,
+            }
+        return None
+
+    async def _ws_things_list(
+        self,
+        conn: Any,
+        frame: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """List observations, optionally filtered to mapped / unmapped."""
+        err = self._require_admin(conn, frame)
+        if err:
+            return err
+        mapped_arg = frame.get("mapped")
+        mapped_filter: bool | None
+        if mapped_arg is True or mapped_arg is False:
+            mapped_filter = mapped_arg
+        else:
+            mapped_filter = None
+        rows = await self.list_observations(mapped=mapped_filter)
+        return {
+            "type": "presence.things.list.result",
+            "ref": frame.get("id"),
+            "things": rows,
+        }
+
+    async def _ws_things_map(
+        self,
+        conn: Any,
+        frame: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Map an observation to a user_id."""
+        err = self._require_admin(conn, frame)
+        if err:
+            return err
+        backend = str(frame.get("backend", ""))
+        thing_id = str(frame.get("thing_id", ""))
+        user_id = str(frame.get("user_id", ""))
+        if not backend or not thing_id or not user_id:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "backend, thing_id, and user_id are required",
+                "code": 400,
+            }
+        row = await self.map_thing(backend, thing_id, user_id)
+        if row is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": f"Unknown thing {backend}:{thing_id}",
+                "code": 404,
+            }
+        return {
+            "type": "presence.things.map.result",
+            "ref": frame.get("id"),
+            "thing": row,
+        }
+
+    async def _ws_things_unmap(
+        self,
+        conn: Any,
+        frame: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Clear an observation's user_id mapping."""
+        err = self._require_admin(conn, frame)
+        if err:
+            return err
+        backend = str(frame.get("backend", ""))
+        thing_id = str(frame.get("thing_id", ""))
+        if not backend or not thing_id:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "backend and thing_id are required",
+                "code": 400,
+            }
+        row = await self.map_thing(backend, thing_id, "")
+        if row is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": f"Unknown thing {backend}:{thing_id}",
+                "code": 404,
+            }
+        return {
+            "type": "presence.things.unmap.result",
+            "ref": frame.get("id"),
+            "thing": row,
+        }
+
+    async def _ws_things_relabel(
+        self,
+        conn: Any,
+        frame: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Set a human-readable label on an observation (cosmetic)."""
+        err = self._require_admin(conn, frame)
+        if err:
+            return err
+        backend = str(frame.get("backend", ""))
+        thing_id = str(frame.get("thing_id", ""))
+        label = str(frame.get("label", ""))
+        if not backend or not thing_id:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "backend and thing_id are required",
+                "code": 400,
+            }
+        row = await self.relabel_thing(backend, thing_id, label)
+        if row is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": f"Unknown thing {backend}:{thing_id}",
+                "code": 404,
+            }
+        return {
+            "type": "presence.things.relabel.result",
+            "ref": frame.get("id"),
+            "thing": row,
         }
