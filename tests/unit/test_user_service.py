@@ -129,6 +129,117 @@ async def test_tool_list_users_strips_password(user_service: UserService) -> Non
         assert "password_hash" not in u
 
 
+# --- resolve_user_id_by_name ---
+
+
+async def test_resolve_user_id_by_name_exact_display_name(
+    user_service: UserService,
+) -> None:
+    """Full display-name match (case-insensitive) returns 1.0 confidence."""
+    await user_service.create_user(
+        "u1", {"email": "alice@example.com", "display_name": "Alice Smith"}
+    )
+    match = await user_service.resolve_user_id_by_name("alice smith")
+    assert match is not None
+    assert match.user_id == "u1"
+    assert match.confidence == 1.0
+
+
+async def test_resolve_user_id_by_name_first_name(
+    user_service: UserService,
+) -> None:
+    """First-name match returns 0.8 confidence."""
+    await user_service.create_user(
+        "u1", {"email": "alice@example.com", "display_name": "Alice Smith"}
+    )
+    match = await user_service.resolve_user_id_by_name("ALICE")
+    assert match is not None
+    assert match.user_id == "u1"
+    assert match.confidence == 0.8
+
+
+async def test_resolve_user_id_by_name_email_local_part(
+    user_service: UserService,
+) -> None:
+    """Email local-part match returns 0.7 confidence."""
+    await user_service.create_user(
+        "u1", {"email": "ahandle@example.com", "display_name": "Alice Smith"}
+    )
+    match = await user_service.resolve_user_id_by_name("ahandle")
+    assert match is not None
+    assert match.user_id == "u1"
+    assert match.confidence == 0.7
+
+
+async def test_resolve_user_id_by_name_returns_none_for_no_match(
+    user_service: UserService,
+) -> None:
+    await user_service.create_user(
+        "u1", {"email": "alice@example.com", "display_name": "Alice Smith"}
+    )
+    assert await user_service.resolve_user_id_by_name("zelda") is None
+
+
+async def test_resolve_user_id_by_name_returns_none_when_input_empty(
+    user_service: UserService,
+) -> None:
+    assert await user_service.resolve_user_id_by_name("") is None
+    assert await user_service.resolve_user_id_by_name("   ") is None
+
+
+async def test_resolve_user_id_by_name_returns_none_on_ambiguous_match(
+    user_service: UserService,
+) -> None:
+    """Two users with the same first name → ambiguous → None.
+
+    Don't silently pick one — the caller would rather fall back to
+    asking a human than risk attributing actions to the wrong person.
+    """
+    await user_service.create_user(
+        "u1",
+        {"username": "asmith", "email": "a@example.com", "display_name": "Alice Smith"},
+    )
+    await user_service.create_user(
+        "u2",
+        {"username": "ajones", "email": "b@example.com", "display_name": "Alice Jones"},
+    )
+    assert await user_service.resolve_user_id_by_name("alice") is None
+
+
+async def test_resolve_user_id_by_name_prefers_higher_priority_match(
+    user_service: UserService,
+) -> None:
+    """When the same string matches at multiple priority levels for
+    different users, the higher-priority bucket wins.
+
+    Here ``alice`` is the full display name of u1, AND the email local
+    part of u2. The full-display match (1.0) takes priority — no
+    ambiguity, no None.
+    """
+    await user_service.create_user(
+        "u1",
+        {"username": "alice", "email": "x@example.com", "display_name": "alice"},
+    )
+    await user_service.create_user(
+        "u2",
+        {"username": "bob", "email": "alice@example.com", "display_name": "Bob"},
+    )
+    match = await user_service.resolve_user_id_by_name("alice")
+    assert match is not None
+    assert match.user_id == "u1"
+    assert match.confidence == 1.0
+
+
+async def test_resolve_user_id_by_name_skips_system_pseudo_users(
+    user_service: UserService,
+) -> None:
+    """root/system/guest are filtered out — they're not real targets."""
+    # ``root`` is auto-created by the service fixture; querying for
+    # its display name must not return it.
+    match = await user_service.resolve_user_id_by_name("root")
+    assert match is None
+
+
 # --- WS handler tests ---
 
 

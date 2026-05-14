@@ -782,6 +782,9 @@ async def test_system_prompt_includes_known_users_directory(
                 {"_id": "system", "display_name": "System", "email": ""},
             ]
 
+        async def resolve_user_id_by_name(self, name: str) -> Any:
+            return None  # Unused — the AI system-prompt path only calls list_users.
+
     user_svc = _StubUserSvc()
     mock_resolver = AsyncMock(spec=ServiceResolver)
 
@@ -845,6 +848,9 @@ async def test_system_prompt_omits_known_users_when_alone(
                 {"_id": "usr_brian", "display_name": "Brian", "email": "brian@example.com"},
                 {"_id": "root", "display_name": "Root", "email": ""},
             ]
+
+        async def resolve_user_id_by_name(self, name: str) -> Any:
+            return None  # Unused — the AI system-prompt path only calls list_users.
 
     user_svc = _LonelyUserSvc()
     mock_resolver = AsyncMock(spec=ServiceResolver)

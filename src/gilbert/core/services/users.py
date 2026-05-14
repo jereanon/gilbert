@@ -21,7 +21,7 @@ from gilbert.interfaces.tools import (
     ToolParameter,
     ToolParameterType,
 )
-from gilbert.interfaces.users import ExternalUser, UserBackend, UserProviderBackend
+from gilbert.interfaces.users import ExternalUser, NameMatch, UserBackend, UserProviderBackend
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +306,71 @@ class UserService(Service):
         """List users, lazily syncing from providers if stale."""
         await self.sync_if_stale()
         return await self.backend.list_users(limit=limit, offset=offset)
+
+    # Confidence rubric for resolve_user_id_by_name. Documented on the
+    # NameMatch type — pinned here so callers don't have to memorize the
+    # numbers and the resolver stays the single source of truth.
+    _NAME_MATCH_DISPLAY_CONFIDENCE: float = 1.0
+    _NAME_MATCH_FIRST_NAME_CONFIDENCE: float = 0.8
+    _NAME_MATCH_EMAIL_LOCAL_CONFIDENCE: float = 0.7
+
+    async def resolve_user_id_by_name(self, name: str) -> NameMatch | None:
+        """Resolve a free-form name string to a unique user_id + confidence.
+
+        Bucketed by match priority — full display name / username
+        (confidence 1.0), then first-name token (0.8), then email local
+        part (0.7). Returns ``NameMatch`` only when exactly one row
+        matches at the highest non-empty bucket. ``None`` for empty
+        input, no match, or ambiguity (multiple rows at the same
+        priority). Callers can threshold on confidence to ignore
+        weaker matches.
+        """
+        if not name:
+            return None
+        target = name.strip().lower()
+        if not target:
+            return None
+        rows = await self.list_users()
+
+        # Each bucket = (confidence, [user_id...]). Iterated in priority
+        # order; first non-empty bucket with exactly one entry wins.
+        buckets: list[tuple[float, list[str]]] = [
+            (self._NAME_MATCH_DISPLAY_CONFIDENCE, []),
+            (self._NAME_MATCH_FIRST_NAME_CONFIDENCE, []),
+            (self._NAME_MATCH_EMAIL_LOCAL_CONFIDENCE, []),
+        ]
+        for row in rows:
+            uid = str(row.get("_id") or row.get("user_id") or "")
+            if not uid or uid in ("system", "guest", "root"):
+                continue
+            display = str(row.get("display_name") or row.get("username") or "").strip().lower()
+            email = str(row.get("email") or "").strip().lower()
+            if display and display == target:
+                buckets[0][1].append(uid)
+                continue
+            if display:
+                first = display.split()[0]
+                if first == target:
+                    buckets[1][1].append(uid)
+                    continue
+            if email:
+                local = email.split("@", 1)[0]
+                if local == target:
+                    buckets[2][1].append(uid)
+                    continue
+
+        for confidence, ids in buckets:
+            if len(ids) == 1:
+                return NameMatch(user_id=ids[0], confidence=confidence)
+            if len(ids) > 1:
+                logger.info(
+                    "resolve_user_id_by_name: ambiguous %r matched %d users at confidence %.2f",
+                    name,
+                    len(ids),
+                    confidence,
+                )
+                return None
+        return None
 
     async def delete_user(self, user_id: str) -> None:
         if user_id == _ROOT_USER_ID:
