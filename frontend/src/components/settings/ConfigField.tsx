@@ -18,6 +18,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -28,6 +29,7 @@ import {
 import { EyeIcon, EyeOffIcon, RotateCcwIcon, PlusIcon, XIcon, SparklesIcon, PuzzleIcon } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { cn } from "@/lib/utils";
 import type { ConfigParamMeta } from "@/types/config";
 import { normalizeChoice } from "@/types/config";
 import { AuthorPromptDialog } from "./AuthorPromptDialog";
@@ -63,34 +65,38 @@ export function ConfigField({ param, value, onChange, namespace }: ConfigFieldPr
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-2">
-        <Label htmlFor={param.key} className="text-sm font-medium">
+        <Label
+          htmlFor={param.key}
+          className="text-xs font-medium leading-none"
+        >
           {label}
         </Label>
         {param.restart_required && (
-          <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-amber-500 border-amber-500/40">
-            restart
-          </Badge>
+          <Badge variant="warning">restart-required</Badge>
         )}
         {canAuthor && (
           <Button
             variant="outline"
-            size="sm"
-            className="ml-auto h-6 gap-1 px-2 text-xs"
+            size="xs"
+            className="ml-auto"
             onClick={() => setAuthorOpen(true)}
             title="Edit this prompt with AI assistance"
           >
-            <SparklesIcon className="size-3" />
+            <SparklesIcon />
             Author with AI
           </Button>
         )}
         <Button
           variant="ghost"
-          size="sm"
-          className={`h-5 w-5 p-0 opacity-40 hover:opacity-100 ${canAuthor ? "" : "ml-auto"}`}
+          size="icon-xs"
+          className={cn(
+            "opacity-50 hover:opacity-100",
+            !canAuthor && "ml-auto",
+          )}
           onClick={handleReset}
           title="Reset to default"
         >
-          <RotateCcwIcon className="size-3" />
+          <RotateCcwIcon />
         </Button>
       </div>
 
@@ -207,21 +213,14 @@ function FieldControl({
   showPassword: boolean;
   setShowPassword: (v: boolean) => void;
 }) {
-  // Boolean → toggle switch
+  // Boolean → Switch primitive (uniform across the app).
   if (param.type === "boolean") {
     const checked = value === true || value === "true";
     return (
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${checked ? "bg-primary" : "bg-muted"}`}
-        onClick={() => onChange(param.key, !checked)}
-      >
-        <span
-          className={`pointer-events-none block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform ${checked ? "translate-x-5" : "translate-x-0"}`}
-        />
-      </button>
+      <Switch
+        checked={checked}
+        onCheckedChange={(v: boolean) => onChange(param.key, v)}
+      />
     );
   }
 
@@ -267,24 +266,28 @@ function FieldControl({
     );
   }
 
-  // String + sensitive → password with reveal toggle
+  // String + sensitive → password with reveal toggle.
+  // The mono Input + signal-color "secret-field" hint marks this as a
+  // technical-content field worth caution.
   if (param.type === "string" && param.sensitive) {
     return (
       <div className="relative">
         <Input
           id={param.key}
+          mono
           type={showPassword ? "text" : "password"}
           value={String(value ?? "")}
           onChange={(e) => onChange(param.key, e.target.value)}
-          className="pr-10 font-mono text-xs"
+          className="pr-8"
         />
         <Button
           variant="ghost"
-          size="sm"
-          className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 p-0"
+          size="icon-xs"
+          className="absolute right-1 top-1/2 -translate-y-1/2"
           onClick={() => setShowPassword(!showPassword)}
+          title={showPassword ? "Hide" : "Reveal"}
         >
-          {showPassword ? <EyeOffIcon className="size-3.5" /> : <EyeIcon className="size-3.5" />}
+          {showPassword ? <EyeOffIcon /> : <EyeIcon />}
         </Button>
       </div>
     );
