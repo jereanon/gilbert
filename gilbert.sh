@@ -290,7 +290,17 @@ build_frontend() {
     # then resolve react / @tanstack/react-query / etc. by walking up
     # to the repo-root node_modules — same way uv hoists Python deps
     # across plugin pyproject.toml workspace members.
-    if [ ! -d "$SCRIPT_DIR/node_modules" ]; then
+    # Reinstall when node_modules is missing OR when the lockfile is
+    # newer than the sentinel npm writes inside node_modules on a
+    # successful install. The latter catches the case where someone
+    # bumps a dep (package.json + package-lock.json change) but
+    # node_modules is stale from a prior install — the build would
+    # otherwise fail with a missing-package resolve error.
+    local lock="$SCRIPT_DIR/package-lock.json"
+    local installed_marker="$SCRIPT_DIR/node_modules/.package-lock.json"
+    if [ ! -d "$SCRIPT_DIR/node_modules" ] \
+       || [ ! -f "$installed_marker" ] \
+       || [ "$lock" -nt "$installed_marker" ]; then
         echo "Installing frontend dependencies (npm workspaces)..."
         # If a pre-workspace standalone install exists, blow it away so
         # npm rebuilds the hoisted layout cleanly.
