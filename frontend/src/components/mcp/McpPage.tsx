@@ -343,7 +343,7 @@ function ServerRow({
               <Badge variant={scopeBadgeVariant(server.scope)}>
                 {server.scope}
               </Badge>
-              <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+              <Badge variant={statusToVariant(status.tone)} dot>{status.label}</Badge>
             </div>
             {server.scope === "shared" && (
               <div className="mt-1 text-xs text-muted-foreground">
@@ -430,21 +430,10 @@ function ServerRow({
   );
 }
 
-interface StatusBadgeProps {
-  tone: "ok" | "warn" | "idle";
-  children: React.ReactNode;
-}
-
-function StatusBadge({ tone, children }: StatusBadgeProps) {
-  const classes =
-    tone === "ok"
-      ? "border-green-500/40 text-green-700 dark:text-green-400"
-      : tone === "warn"
-      ? "border-destructive/40 text-destructive"
-      : "text-muted-foreground";
-  return (
-    <Badge variant="outline" className={classes}>
-      {children}
-    </Badge>
-  );
+/** Map the McpStatus tone strings onto the design-system Badge
+ *  state variants. The dot prop carries the semantic color. */
+function statusToVariant(tone: "ok" | "warn" | "idle"): "success" | "error" | "off" {
+  if (tone === "ok") return "success";
+  if (tone === "warn") return "error";
+  return "off";
 }
