@@ -56,12 +56,12 @@ For any `asyncio.Lock` or `asyncio.Semaphore`, ask: does this lock protect a res
 4. Remove the instance attribute. The absence is a feature — it forces future code to go through the ContextVar.
 5. Update tests that directly assigned to the instance attribute to call the setter instead (see `test_ai_service.py` for the pattern: `set_current_conversation_id("conv-x")` before the code under test runs).
 
-### Related architecture-checklist section
+### Related audit
 
-The "Multi-User Isolation" section of `memory-architecture-checklist.md` lists the specific grep patterns to run when auditing. Keep these two memories in sync — the principle lives here, the mechanical audit lives in the checklist.
+The "Multi-User Isolation" category in the `validate-architecture` skill (`.claude/skills/validate-architecture/SKILL.md`) lists the specific grep patterns to run when auditing. Keep this memory and that skill in sync — the principle lives here, the mechanical audit lives in the skill.
 
 ## Related
 - [AI Service](memory-ai-service.md) — example of per-request state migrated to ContextVars (`_current_conversation_id`)
 - [Speaker System](memory-speaker-system.md) — per-target locks (per-speaker) example
-- [Architecture Violation Checklist](memory-architecture-checklist.md) — the auditable version of this
+- `.claude/skills/validate-architecture/SKILL.md` — the auditable version of this
 - `src/gilbert/core/context.py` — where `_current_user` and `_current_conversation_id` live

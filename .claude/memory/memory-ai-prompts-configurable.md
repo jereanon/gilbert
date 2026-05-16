@@ -72,7 +72,7 @@ A few prompts are intentionally NOT exposed:
 When in doubt: expose it. Recovery from a bad edit is one Reset button click; recovery from a hidden hardcoded prompt requires a code change.
 
 ### Architecture audit hook
-The "Hardcoded AI prompt" check is part of the architecture violation checklist (see [Architecture Violation Checklist](memory-architecture-checklist.md)). When the user asks to audit the code, grep for `system_prompt=` literal strings and `_DEFAULT_*PROMPT` constants and verify each is wired to a `ConfigParam(ai_prompt=True)`.
+The "Hardcoded AI prompts" check is part of the `validate-architecture` skill (`.claude/skills/validate-architecture/SKILL.md`). When the user asks to audit the code, grep for `system_prompt=` literal strings and `_DEFAULT_*PROMPT` constants and verify each is wired to a `ConfigParam(ai_prompt=True)`.
 
 ## Related
 - [Configuration Service](memory-configuration-service.md) — `ConfigParam.ai_prompt` flag and `config.prompt.author` WS handler

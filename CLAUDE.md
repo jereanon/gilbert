@@ -127,11 +127,13 @@ gotchas, etc.
 - **Plugins ship their own UI inside their plugin directory.** A plugin contributing SPA components keeps every TS/TSX file under `<plugin>/frontend/` (types, API hooks, components, styles, side-effect register). Core SPA pages declare `<PluginPanelSlot slot="…">` extension points and never import from a plugin's `frontend/`. The plugin's Python `Plugin.ui_panels()` declares `UIPanel(panel_id, slot, required_role)` entries; the matching `<plugin>/frontend/panels.ts` calls `registerPanel(panel_id, Component)`. See [Plugin UI Extensions](.claude/memory/memory-plugin-ui-extensions.md).
 - **Plugin OS deps go through `runtime_dependencies()`.** A plugin that needs binaries / system libraries beyond what `pyproject.toml` can install (Chromium, tesseract, ffmpeg, …) overrides `Plugin.runtime_dependencies()` with `RuntimeDependency` entries. `./gilbert.sh doctor` runs the checks; `--install` runs each `auto_install_cmd` for plugins that opted in. The check should ideally exercise the dep (e.g. actually launch the browser), not just probe a path. See [Plugin runtime_dependencies](.claude/memory/memory-runtime-dependencies.md).
 
-## Architecture Violation Checklist
+## Architecture Rules — `validate-architecture` skill
 
-When the user says "check the rules," "check for violations," "audit the architecture," or similar, run the full checklist in [Architecture Violation Checklist](.claude/memory/memory-architecture-checklist.md) across `src/` and `std-plugins/`, report findings, and fix them — including README freshness. Don't just flag stale docs; fix them.
+The `validate-architecture` skill (`.claude/skills/validate-architecture/SKILL.md`) is the canonical architectural rulebook. It covers layer imports, concrete-class violations, duck-typing / private access, business logic placement, hardcoded AI prompts, multi-user isolation, plugin rules, slash-command requirements, frontend extension rules, AI-backend visibility, and documentation freshness (root `README.md`, `std-plugins/README.md`, `std-plugins/CLAUDE.md`, this file).
 
-Top-level categories covered there: layer import violations, concrete-class violations, duck-typing / private access, business logic in wrong layer, plugin-specific checks, slash command violations, and documentation freshness (root `README.md`, `std-plugins/README.md`, `std-plugins/CLAUDE.md`, this file).
+**Load it before implementing anything new.** Before adding a new service, integration, plugin, web route, AI tool, or any non-trivial feature, invoke the skill so the rules guide the design — not after the fact. Trivial fixes (typo, comment, one-line bug) don't need it.
+
+**Run it as an audit** when the user says "check the rules," "check for violations," "audit the architecture," or similar. Don't just flag stale docs; fix them.
 
 ## Commands
 
