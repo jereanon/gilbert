@@ -136,7 +136,17 @@ Plugin UI lives inside the plugin's own directory; core SPA never imports plugin
 
 Only `AIService`, AI profiles, and the chat UI know about AI backends. No service caller should reference backend names, model IDs, or backend classes directly. Audit consumer services for hardcoded model strings (`"claude-..."`, `"gpt-..."`) or imports of concrete AI backend classes.
 
-### 11. Documentation Freshness
+### 11. Capability Wiring (declared vs consumed)
+
+Every string passed to `resolver.get_capability("…")` / `resolver.require_capability("…")` / `resolver.get_all("…")` must appear in some service's `ServiceInfo.capabilities=frozenset({…})`. A consumer asking for `"ai"` when the service advertises `"ai_chat"` silently returns `None` — the calling code's `isinstance` gate falls through to "service unavailable" and the feature only breaks when the dead code path runs.
+
+```bash
+python3 .claude/skills/validate-architecture/check_capabilities.py
+```
+
+Anything reported is a bug — fix at the call site (consumer asking for the wrong name) or at the declaration (service forgot to advertise the cap the consumer needs). Lookups through a variable (`get_capability(self._cap_name)`) can't be checked statically and are skipped. The inverse direction (capabilities declared but never consumed) is **not** flagged: too many caps are identification-only (plugin slugs, framework-iterated `ws_handlers` / `ai_tools`, frontend RPC `requires_capability` fields).
+
+### 12. Documentation Freshness
 
 These docs are product documentation, not advisory notes. Drift is a regression to fix in the same change that caused it.
 
