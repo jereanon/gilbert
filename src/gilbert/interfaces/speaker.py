@@ -47,6 +47,19 @@ def to_browser_url(url: str) -> str:
     )
 
 
+def split_speaker_id(speaker_id: str) -> tuple[str, str]:
+    """Split a namespaced speaker id ``<backend>:<native>`` into its parts.
+
+    Raises ``ValueError`` if ``speaker_id`` is not namespaced. Callers
+    above the backend boundary should always pass namespaced ids; bare
+    native ids are a sign of legacy / un-migrated data.
+    """
+    if ":" not in speaker_id:
+        raise ValueError(f"speaker_id must be namespaced '<backend>:<native>', got {speaker_id!r}")
+    backend, _, native = speaker_id.partition(":")
+    return backend, native
+
+
 class PlaybackState(StrEnum):
     """Current playback state of a speaker."""
 
