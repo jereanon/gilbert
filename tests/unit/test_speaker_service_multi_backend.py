@@ -1,4 +1,6 @@
-"""Task 8: SpeakerService._backends dict storage tests."""
+"""Task 8 + 9: SpeakerService._backends dict storage and _reinit_backends lifecycle tests."""
+
+import logging
 
 import pytest
 from gilbert.core.services.speaker import SpeakerService
@@ -83,3 +85,52 @@ async def test_service_stores_backends_in_dict():
     assert isinstance(svc._backends, dict)
     assert set(svc._backends) == {"fake_a", "fake_b"}
     assert svc.backends["fake_a"] is svc._backends["fake_a"]
+
+
+# ---------------------------------------------------------------------------
+# Task 9: _reinit_backends lifecycle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reinit_backends_starts_enabled_drops_disabled():
+    svc = SpeakerService()
+    await svc._reinit_backends({
+        "fake_a": {"enabled": True},
+        "fake_b": {"enabled": False},
+    })
+    assert set(svc._backends) == {"fake_a"}
+
+    # Flip enable states
+    await svc._reinit_backends({
+        "fake_a": {"enabled": False},
+        "fake_b": {"enabled": True},
+    })
+    assert set(svc._backends) == {"fake_b"}
+
+
+@pytest.mark.asyncio
+async def test_reinit_backends_records_startup_failure_for_failing_backend(caplog):
+    class FakeBackendBoom(FakeSpeakerBackendA):
+        backend_name = "fake_boom"
+
+        async def initialize(self, config: dict) -> None:
+            raise RuntimeError("backend failure")
+
+    svc = SpeakerService()
+    with caplog.at_level(logging.WARNING, logger="gilbert.core.services.speaker"):
+        await svc._reinit_backends({"fake_a": {"enabled": True}, "fake_boom": {"enabled": True}})
+    assert "fake_a" in svc._backends
+    assert "fake_boom" not in svc._backends
+    assert "fake_boom" in svc._startup_failures
+    assert "backend failure" in svc._startup_failures["fake_boom"]
+
+
+@pytest.mark.asyncio
+async def test_reinit_backends_drops_section_not_in_config():
+    svc = SpeakerService()
+    await svc._reinit_backends({"fake_a": {"enabled": True}, "fake_b": {"enabled": True}})
+    assert set(svc._backends) == {"fake_a", "fake_b"}
+    # Remove fake_a entirely from config
+    await svc._reinit_backends({"fake_b": {"enabled": True}})
+    assert set(svc._backends) == {"fake_b"}

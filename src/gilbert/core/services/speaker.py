@@ -55,6 +55,7 @@ class SpeakerService(Service):
     def __init__(self) -> None:
         self._backends: dict[str, SpeakerBackend] = {}
         self._backend_name: str = "sonos"
+        self._primary_backend: str = ""
         self._enabled: bool = False
         self._config: dict[str, object] = {}
         self._output_ttl_seconds: int = 3600
@@ -75,6 +76,9 @@ class SpeakerService(Service):
         self._speaker_locks: dict[str, asyncio.Lock] = {}
         self._speaker_locks_guard = asyncio.Lock()
         self._speaker_cache: list[SpeakerInfo] = []
+        # Backend startup failures keyed by backend name. Populated by
+        # ``_reinit_backends`` when a backend raises during initialization.
+        self._startup_failures: dict[str, str] = {}
         # Wired in start() for the per-user browser-echo fan-out. Both
         # are optional — if either is missing (no user service, no
         # event bus) the fan-out silently no-ops. The primary backend
@@ -196,37 +200,20 @@ class SpeakerService(Service):
 
         self._enabled = True
         self._apply_config(section)
+        self._primary_backend = section.get("primary_backend", "")
 
         # Side-effect imports so the bundled vendor-free backends
         # register. Third-party backends (Sonos, …) register via plugins.
         import gilbert.integrations.browser_speaker  # noqa: F401
         import gilbert.integrations.local_speaker  # noqa: F401
 
-        backend_name = section.get("backend", "sonos")
-        self._backend_name = backend_name
-        registered = SpeakerBackend.registered_backends()
-        backend_cls = registered.get(backend_name)
-        if backend_cls is None:
-            raise ValueError(f"Unknown speaker backend: {backend_name}")
-        backend = backend_cls()
-        self._backends[backend.backend_name] = backend
-
-        # Hand the backend an event-bus provider if it asked for one
-        # (currently only ``BrowserSpeakerBackend`` — it publishes
-        # ``speaker.browser.*`` frames to a target user's WS connections).
+        # Stash the event-bus provider before _reinit_backends so any
+        # EventBusAwareSpeakerBackend initialized there can be wired.
         from gilbert.interfaces.events import EventBusProvider
-        from gilbert.interfaces.speaker import EventBusAwareSpeakerBackend
 
         bus_svc = resolver.get_capability("event_bus")
-        # Stash for the browser-echo fan-out regardless of primary
-        # backend type — even Sonos-targeted plays need it to push a
-        # second copy at a user's browser when echo is on.
         if isinstance(bus_svc, EventBusProvider):
             self._event_bus_provider = bus_svc
-
-        if isinstance(backend, EventBusAwareSpeakerBackend):
-            if isinstance(bus_svc, EventBusProvider):
-                backend.set_event_bus_provider(bus_svc)
 
         # User-prefs lookup for the browser-echo fan-out. Optional —
         # without it the fan-out helper bails early and only the
@@ -237,8 +224,8 @@ class SpeakerService(Service):
         if isinstance(users_svc, UserPrefReader):
             self._users_svc = users_svc
 
-        init_config: dict[str, object] = dict(self._config)
-        await backend.initialize(init_config)
+        # Initialize all configured backends.
+        await self._reinit_backends(section.get("backends", {}))
 
         # Ensure alias index
         from gilbert.interfaces.storage import IndexDefinition
@@ -251,12 +238,6 @@ class SpeakerService(Service):
                 unique=True,
             )
         )
-
-        # Populate speaker cache for dynamic choices (namespaced)
-        try:
-            self._speaker_cache = await self.list_speakers()
-        except Exception:
-            logger.debug("Could not cache speakers on start")
 
         logger.info("Speaker service started")
 
@@ -299,6 +280,66 @@ class SpeakerService(Service):
         spk = section.get("default_announce_speakers")
         if isinstance(spk, list):
             self._default_announce_speakers = spk
+
+    async def _refresh_cached_speakers(self) -> None:
+        """Refresh the cached speaker list from all loaded backends.
+
+        Swallows any exceptions so a backend that fails discovery on
+        startup doesn't prevent other backends from being cached.
+        """
+        try:
+            self._speaker_cache = await self.list_speakers()
+        except Exception:
+            logger.debug("Could not refresh speaker cache", exc_info=True)
+
+    async def _reinit_backends(self, backends_config: dict[str, Any]) -> None:
+        """Reinitialize backends from config, closing any that changed.
+
+        Backends with ``enabled=False`` in their config section are skipped
+        entirely. A backend whose name doesn't appear in ``backends_config``
+        at all is treated as not configured and dropped.
+        """
+        from gilbert.interfaces.speaker import EventBusAwareSpeakerBackend
+
+        if not isinstance(backends_config, dict):
+            return
+        for name, cls in SpeakerBackend.registered_backends().items():
+            if name not in backends_config:
+                old = self._backends.pop(name, None)
+                if old is not None:
+                    await old.close()
+                    logger.info("speaker backend '%s' removed (no config section)", name)
+                self._startup_failures.pop(name, None)
+                continue
+            cfg = backends_config.get(name, {})
+            if not isinstance(cfg, dict):
+                cfg = {}
+            enabled = cfg.get("enabled", True) is True
+            old = self._backends.get(name)
+            if not enabled:
+                if old is not None:
+                    await old.close()
+                    self._backends.pop(name, None)
+                    logger.info("speaker backend '%s' disabled, closed", name)
+                self._startup_failures.pop(name, None)
+                continue
+            try:
+                inst = cls()
+                # Wire event bus if backend wants it (e.g. BrowserSpeakerBackend
+                # needs it to publish speaker.browser.* frames).
+                if isinstance(inst, EventBusAwareSpeakerBackend) and self._event_bus_provider is not None:
+                    inst.set_event_bus_provider(self._event_bus_provider)
+                await inst.initialize(cfg)
+                if old is not None:
+                    await old.close()
+                self._backends[name] = inst
+                self._startup_failures.pop(name, None)
+                logger.info("speaker backend '%s' (re)initialized", name)
+            except Exception as exc:
+                self._startup_failures[name] = str(exc)
+                if old is None:
+                    logger.warning("speaker backend '%s' failed to start: %s", name, exc)
+        await self._refresh_cached_speakers()
 
     # --- Configurable protocol ---
 
@@ -364,6 +405,8 @@ class SpeakerService(Service):
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._apply_config(config)
+        self._primary_backend = config.get("primary_backend", self._primary_backend)
+        await self._reinit_backends(config.get("backends", {}))
 
     # --- ConfigActionProvider ---
 
