@@ -864,13 +864,13 @@ class SpeakerService(Service):
         if self._last_speaker_ids:
             return await backend.get_now_playing(self._native_id(self._last_speaker_ids[0]))
 
-        speakers = await backend.list_speakers()
+        speakers = await self.list_speakers()
         if not speakers:
             return NowPlaying(state=PlaybackState.STOPPED)
         for s in speakers:
             if s.state == PlaybackState.PLAYING:
-                return await backend.get_now_playing(s.speaker_id)
-        return await backend.get_now_playing(speakers[0].speaker_id)
+                return await backend.get_now_playing(self._native_id(s.speaker_id))
+        return await backend.get_now_playing(self._native_id(speakers[0].speaker_id))
 
     # --- Announce ---
 
