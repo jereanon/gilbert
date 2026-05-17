@@ -1180,3 +1180,104 @@ async def test_list_speakers_returns_namespaced_ids(
     for s in speakers:
         assert ":" in s.speaker_id, f"id {s.speaker_id!r} not namespaced"
         assert s.backend_name, f"backend_name not stamped on {s}"
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Dispatch boundary fixes — tool methods must strip/namespace correctly
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tool_group_speakers_passes_native_ids_to_backend(
+    service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
+) -> None:
+    """Backend.group_speakers must receive bare native IDs, not namespaced.
+
+    This test guards against the bug where tool methods passed namespaced
+    IDs (from resolve_speaker_names) directly to the backend without
+    stripping the ``<backend>:`` prefix first. The backend always works
+    with bare native IDs.
+    """
+    await service.start(resolver)
+    captured: dict[str, list[str]] = {}
+
+    async def capture_group(ids: list[str]) -> SpeakerGroup:
+        captured["ids"] = list(ids)
+        return SpeakerGroup(
+            group_id="g1",
+            name="Captured Group",
+            coordinator_id=ids[0],
+            member_ids=list(ids),
+        )
+
+    stub_backend.group_speakers = capture_group  # type: ignore[method-assign]
+
+    await service.execute_tool(
+        "group_speakers", {"speakers": ["Speaker 1", "Speaker 2"]}
+    )
+    assert captured["ids"] == ["uid-1", "uid-2"], (
+        f"Backend.group_speakers must receive bare native ids, got {captured['ids']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_ungroup_speakers_passes_native_ids_to_backend(
+    service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
+) -> None:
+    """Backend.ungroup_speakers must receive bare native IDs, not namespaced.
+
+    This test guards against the bug where tool methods passed namespaced
+    IDs (from resolve_speaker_names) directly to the backend without
+    stripping the ``<backend>:`` prefix first.
+    """
+    await service.start(resolver)
+    captured: dict[str, list[str]] = {}
+
+    async def capture_ungroup(ids: list[str]) -> None:
+        captured["ids"] = list(ids)
+
+    stub_backend.ungroup_speakers = capture_ungroup  # type: ignore[method-assign]
+
+    await service.execute_tool("ungroup_speakers", {"speakers": ["Speaker 1"]})
+    assert captured["ids"] == ["uid-1"], (
+        f"Backend.ungroup_speakers must receive bare native ids, got {captured['ids']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_list_groups_returns_namespaced_ids(
+    service: SpeakerService, stub_backend: StubSpeakerBackend, resolver: ServiceResolver
+) -> None:
+    """list_speaker_groups tool must return namespaced IDs per the service contract.
+
+    This test guards against the bug where the tool method called the backend
+    directly instead of going through list_speaker_groups(), which applies
+    the ``<backend>:`` namespace prefix. Without the prefix, callers get bare
+    IDs that don't match the namespaced IDs from list_speakers().
+    """
+    await service.start(resolver)
+
+    async def fake_list_groups() -> list[SpeakerGroup]:
+        return [
+            SpeakerGroup(
+                group_id="g1",
+                name="Group1",
+                coordinator_id="uid-1",
+                member_ids=["uid-1", "uid-2"],
+            )
+        ]
+
+    stub_backend.list_groups = fake_list_groups  # type: ignore[method-assign]
+
+    result = await service.execute_tool("list_speaker_groups", {})
+    parsed = json.loads(result)
+    assert len(parsed) == 1
+    group = parsed[0]
+    # All IDs must be namespaced: "stub:uid-N"
+    assert group["coordinator_id"].startswith("stub:"), (
+        f"list_speaker_groups tool must return namespaced coordinator_id, got {group['coordinator_id']}"
+    )
+    for mid in group["member_ids"]:
+        assert mid.startswith("stub:"), (
+            f"list_speaker_groups tool must return namespaced member_ids, got {mid}"
+        )

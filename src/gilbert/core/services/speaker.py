@@ -1512,7 +1512,7 @@ class SpeakerService(Service):
         )
 
     async def _tool_list_groups(self) -> str:
-        groups = await self._require_backend().list_groups()
+        groups = await self.list_speaker_groups()
         return json.dumps(
             [
                 {
@@ -1530,7 +1530,7 @@ class SpeakerService(Service):
         speaker_ids = await self.resolve_speaker_names(speaker_names)
 
         try:
-            group = await self._require_backend().group_speakers(speaker_ids)
+            group = await self._require_backend().group_speakers(self._native_ids(speaker_ids))
         except ValueError as e:
             return json.dumps({"error": str(e)})
 
@@ -1546,5 +1546,5 @@ class SpeakerService(Service):
     async def _tool_ungroup_speakers(self, arguments: dict[str, Any]) -> str:
         speaker_names: list[str] = arguments["speakers"]
         speaker_ids = await self.resolve_speaker_names(speaker_names)
-        await self._require_backend().ungroup_speakers(speaker_ids)
+        await self._require_backend().ungroup_speakers(self._native_ids(speaker_ids))
         return json.dumps({"status": "ungrouped"})
