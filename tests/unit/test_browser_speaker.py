@@ -256,3 +256,75 @@ def test_backend_registers_under_browser_name() -> None:
     assert (
         SpeakerBackend.registered_backends()["browser"] is BrowserSpeakerBackend
     )
+
+
+# --- _to_browser_url: scheme/host stripping for Gilbert-minted URLs ---
+
+
+def test_to_browser_url_strips_scheme_and_host_for_output_urls() -> None:
+    # SpeakerService.announce() builds these — must become relative so the
+    # SPA loads them against its own origin (works behind HTTPS proxies).
+    url = "http://192.168.1.42:8000/output/speaker/announce-abc.mp3"
+    assert (
+        BrowserSpeakerBackend._to_browser_url(url)
+        == "/output/speaker/announce-abc.mp3"
+    )
+
+
+def test_to_browser_url_preserves_query_string() -> None:
+    url = "http://x:8000/output/speaker/foo.mp3?ttl=600"
+    assert (
+        BrowserSpeakerBackend._to_browser_url(url)
+        == "/output/speaker/foo.mp3?ttl=600"
+    )
+
+
+def test_to_browser_url_leaves_external_urls_alone() -> None:
+    # Free-form ``play_audio`` URLs pointing at podcast.example.com etc.
+    # must NOT be stripped — that would point them at the SPA origin.
+    url = "https://podcast.example.com/episode-12.mp3"
+    assert BrowserSpeakerBackend._to_browser_url(url) == url
+
+
+def test_to_browser_url_leaves_already_relative_urls_alone() -> None:
+    assert (
+        BrowserSpeakerBackend._to_browser_url("/output/speaker/foo.mp3")
+        == "/output/speaker/foo.mp3"
+    )
+
+
+def test_to_browser_url_leaves_non_output_paths_alone() -> None:
+    # Heuristic: only ``/output/`` paths are Gilbert-minted. Anything
+    # else stays absolute so we don't break URLs the AI was explicitly
+    # told to play.
+    url = "http://example.com/api/some-file.mp3"
+    assert BrowserSpeakerBackend._to_browser_url(url) == url
+
+
+def test_to_browser_url_handles_empty_string() -> None:
+    assert BrowserSpeakerBackend._to_browser_url("") == ""
+
+
+@pytest.mark.asyncio
+async def test_play_uri_rewrites_gilbert_minted_url_to_relative(
+    backend: BrowserSpeakerBackend, bus: StubBus
+) -> None:
+    backend.set_event_bus_provider(StubBusProvider(bus))
+    await backend.initialize({})
+    set_current_user(_alice())
+    set_current_conversation_id("conv-rewrite")
+
+    # This is what SpeakerService._audio_url() actually produces.
+    await backend.play_uri(
+        PlayRequest(
+            uri="http://192.168.1.42:8000/output/speaker/announce-xyz.mp3",
+            volume=80,
+            title="rewrite me",
+        )
+    )
+
+    assert len(bus.published) == 1
+    assert (
+        bus.published[0].data["url"]
+        == "/output/speaker/announce-xyz.mp3"
+    )
