@@ -17,11 +17,18 @@ import { useWebSocket } from "./useWebSocket";
 export function useBrowserEchoPref(): {
   enabled: boolean;
   ready: boolean;
+  primaryBackend: string;
+  /** True when the primary speaker backend is itself ``browser`` —
+   *  in that config the echo toggle is a no-op (the service-side
+   *  gate short-circuits to avoid double-play) and the UI should
+   *  reflect that rather than pretending the toggle does anything. */
+  redundantWithPrimary: boolean;
   setEnabled: (next: boolean) => Promise<void>;
 } {
   const { rpc, connected } = useWebSocket();
   const [enabled, setEnabledState] = useState(false);
   const [ready, setReady] = useState(false);
+  const [primaryBackend, setPrimaryBackend] = useState<string>("");
 
   useEffect(() => {
     let cancelled = false;
@@ -34,13 +41,21 @@ export function useBrowserEchoPref(): {
     }
     (async () => {
       try {
-        const reply = await rpc<{ value?: unknown }>({
-          type: "users.prefs.get",
-          key: "speaker.browser_echo",
-          default: false,
-        } as Record<string, unknown>);
+        const [prefReply, infoReply] = await Promise.all([
+          rpc<{ value?: unknown }>({
+            type: "users.prefs.get",
+            key: "speaker.browser_echo",
+            default: false,
+          } as Record<string, unknown>),
+          rpc<{ enabled?: boolean; backend?: string }>({
+            type: "speaker.info",
+          } as Record<string, unknown>),
+        ]);
         if (cancelled) return;
-        setEnabledState(reply?.value === true);
+        setEnabledState(prefReply?.value === true);
+        setPrimaryBackend(
+          typeof infoReply?.backend === "string" ? infoReply.backend : "",
+        );
       } catch (err) {
         // Connection blip / unauthenticated session — leave the toggle
         // in its default "off" state and let the user re-toggle once
@@ -78,5 +93,11 @@ export function useBrowserEchoPref(): {
     [enabled, rpc],
   );
 
-  return { enabled, ready, setEnabled };
+  return {
+    enabled,
+    ready,
+    primaryBackend,
+    redundantWithPrimary: primaryBackend === "browser",
+    setEnabled,
+  };
 }

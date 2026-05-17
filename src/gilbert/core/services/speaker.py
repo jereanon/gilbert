@@ -82,7 +82,7 @@ class SpeakerService(Service):
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="speaker",
-            capabilities=frozenset({"speaker_control", "ai_tools"}),
+            capabilities=frozenset({"speaker_control", "ai_tools", "ws_handlers"}),
             requires=frozenset({"entity_storage"}),
             optional=frozenset(
                 {"configuration", "text_to_speech", "users", "event_bus"}
@@ -977,6 +977,33 @@ class SpeakerService(Service):
 
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
+
+    # --- WsHandlerProvider protocol ---
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        return {"speaker.info": self._ws_speaker_info}
+
+    async def _ws_speaker_info(
+        self, conn: Any, frame: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Report whether the service is enabled and which backend is primary.
+
+        Lets the SPA reason about the speaker subsystem without poking
+        at the settings RPC (which is admin-only and heavier). The
+        Browser Echo toggle reads this to disable itself when the
+        primary backend is already ``browser`` — flipping the echo
+        toggle in that config would be a no-op (the gate in
+        ``_browser_echo_should_fire`` short-circuits to avoid
+        double-play), so the UI shouldn't pretend otherwise.
+
+        Public — any authenticated connection can read.
+        """
+        return {
+            "type": "gilbert.result",
+            "ref": frame.get("id"),
+            "enabled": self._enabled,
+            "backend": self._backend_name if self._enabled else "",
+        }
 
     # --- ToolProvider protocol ---
 

@@ -273,3 +273,55 @@ async def test_stop_echo_silent_when_primary_is_browser(svc: SpeakerService) -> 
     await svc._maybe_echo_stop_to_browser()
 
     assert svc._event_bus_provider.bus.published == []
+
+
+# ── speaker.info WS handler — drives the SPA's "is echo a no-op?" check ─
+
+
+@pytest.mark.asyncio
+async def test_speaker_info_reports_backend_when_enabled(
+    svc: SpeakerService,
+) -> None:
+    svc._enabled = True
+    svc._backend_name = "sonos"
+    reply = await svc._ws_speaker_info(None, {"id": "1"})
+    assert reply["type"] == "gilbert.result"
+    assert reply["enabled"] is True
+    assert reply["backend"] == "sonos"
+
+
+@pytest.mark.asyncio
+async def test_speaker_info_blank_backend_when_disabled(
+    svc: SpeakerService,
+) -> None:
+    # When the service is toggled off the backend name is meaningless —
+    # report empty so the SPA doesn't gate UI on a stale value.
+    svc._enabled = False
+    svc._backend_name = "sonos"  # would be set from prior boot
+    reply = await svc._ws_speaker_info(None, {"id": "1"})
+    assert reply["type"] == "gilbert.result"
+    assert reply["enabled"] is False
+    assert reply["backend"] == ""
+
+
+@pytest.mark.asyncio
+async def test_speaker_info_reports_browser_primary(
+    svc: SpeakerService,
+) -> None:
+    # This is the case the SPA cares about — it disables the echo
+    # toggle when the response says ``backend == "browser"``.
+    svc._enabled = True
+    svc._backend_name = "browser"
+    reply = await svc._ws_speaker_info(None, {"id": "1"})
+    assert reply["backend"] == "browser"
+
+
+def test_speaker_service_advertises_ws_handlers_capability() -> None:
+    info = SpeakerService().service_info()
+    assert "ws_handlers" in info.capabilities
+
+
+def test_speaker_service_exposes_speaker_info_handler() -> None:
+    svc = SpeakerService()
+    handlers = svc.get_ws_handlers()
+    assert "speaker.info" in handlers

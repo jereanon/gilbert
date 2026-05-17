@@ -1170,9 +1170,15 @@ export function ChatPage() {
               <TooltipTrigger
                 render={
                   <Button
-                    variant={browserEcho.enabled ? "default" : "ghost"}
+                    variant={
+                      browserEcho.enabled && !browserEcho.redundantWithPrimary
+                        ? "default"
+                        : "ghost"
+                    }
                     size="icon-sm"
-                    disabled={!browserEcho.ready}
+                    disabled={
+                      !browserEcho.ready || browserEcho.redundantWithPrimary
+                    }
                     onClick={() => {
                       void browserEcho.setEnabled(!browserEcho.enabled);
                     }}
@@ -1183,9 +1189,11 @@ export function ChatPage() {
                 <HeadphonesIcon className="size-4" />
               </TooltipTrigger>
               <TooltipContent>
-                {browserEcho.enabled
-                  ? "Browser echo: ON (Gilbert also plays through this tab)"
-                  : "Browser echo: OFF (click to also play through this tab)"}
+                {browserEcho.redundantWithPrimary
+                  ? "Browser echo unavailable — primary speaker backend is already 'browser', so audio always plays through this tab. Switch the primary backend in Settings → Media → Speaker to use this toggle."
+                  : browserEcho.enabled
+                    ? "Browser echo: ON (Gilbert also plays through this tab)"
+                    : "Browser echo: OFF (click to also play through this tab)"}
               </TooltipContent>
             </Tooltip>
 
