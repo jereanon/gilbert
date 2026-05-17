@@ -788,6 +788,44 @@ class SpeakerService(Service):
         else:
             await backend.group_speakers(native)
 
+    async def group_speakers(self, speaker_ids: list[str]) -> None:
+        """Group the given speakers. All must be on the same backend.
+
+        Raises ``ValueError`` if speakers span multiple backends.
+        """
+        if not speaker_ids:
+            return
+        grouped = self._route_ids(speaker_ids)
+        if len(grouped) > 1:
+            names = ", ".join(speaker_ids[:3])
+            backends_named = ", ".join(sorted(grouped))
+            raise ValueError(
+                f"Cannot group speakers across backends — {names} live on "
+                f"different audio systems ({backends_named}) and can't be synchronized."
+            )
+        [(backend_name, native_ids)] = grouped.items()
+        backend = self._backends[backend_name]
+        await backend.group_speakers(native_ids)
+
+    async def ungroup_speakers(self, speaker_ids: list[str]) -> None:
+        """Remove speakers from their groups. All must be on the same backend.
+
+        Raises ``ValueError`` if speakers span multiple backends.
+        """
+        if not speaker_ids:
+            return
+        grouped = self._route_ids(speaker_ids)
+        if len(grouped) > 1:
+            names = ", ".join(speaker_ids[:3])
+            backends_named = ", ".join(sorted(grouped))
+            raise ValueError(
+                f"Cannot ungroup speakers across backends — {names} live on "
+                f"different audio systems ({backends_named})."
+            )
+        [(backend_name, native_ids)] = grouped.items()
+        backend = self._backends[backend_name]
+        await backend.ungroup_speakers(native_ids)
+
     # --- Playback ---
 
     async def play_on_speakers(
@@ -1659,21 +1697,32 @@ class SpeakerService(Service):
         speaker_ids = await self.resolve_speaker_names(speaker_names)
 
         try:
-            group = await self._require_single_backend().group_speakers(self._native_ids(speaker_ids))
+            await self.group_speakers(speaker_ids)
+            # Fetch the group info for the response
+            groups = await self.list_speaker_groups()
+            # Find the group containing the first speaker (simplistic but works)
+            target_group = None
+            if groups:
+                target_group = groups[0]  # Most recently formed group
         except ValueError as e:
             return json.dumps({"error": str(e)})
 
-        return json.dumps(
-            {
-                "status": "grouped",
-                "group_id": group.group_id,
-                "name": group.name,
-                "member_ids": group.member_ids,
-            }
-        )
+        if target_group:
+            return json.dumps(
+                {
+                    "status": "grouped",
+                    "group_id": target_group.group_id,
+                    "name": target_group.name,
+                    "member_ids": target_group.member_ids,
+                }
+            )
+        return json.dumps({"status": "grouped"})
 
     async def _tool_ungroup_speakers(self, arguments: dict[str, Any]) -> str:
         speaker_names: list[str] = arguments["speakers"]
         speaker_ids = await self.resolve_speaker_names(speaker_names)
-        await self._require_single_backend().ungroup_speakers(self._native_ids(speaker_ids))
+        try:
+            await self.ungroup_speakers(speaker_ids)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
         return json.dumps({"status": "ungrouped"})

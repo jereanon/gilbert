@@ -176,3 +176,36 @@ async def test_list_speakers_returns_empty_when_no_backends():
     svc = SpeakerService()
     speakers = await svc.list_speakers()
     assert speakers == []
+
+
+# ---------------------------------------------------------------------------
+# Task 11: group_speakers / ungroup_speakers cross-backend rejection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_group_speakers_rejects_cross_backend():
+    """Cross-backend grouping is impossible; service must raise."""
+    svc = SpeakerService()
+    svc._backends = {
+        "fake_a": FakeSpeakerBackendA(),
+        "fake_b": FakeSpeakerBackendB(),
+    }
+    with pytest.raises(ValueError, match="across backends"):
+        await svc.group_speakers(["fake_a:a1", "fake_b:b1"])
+
+
+@pytest.mark.asyncio
+async def test_group_speakers_passes_through_same_backend():
+    """Same-backend grouping dispatches normally."""
+    svc = SpeakerService()
+    a = FakeSpeakerBackendA()
+    svc._backends = {"fake_a": a}
+    captured: dict = {}
+    async def capture_group(ids: list[str]) -> SpeakerGroup:
+        captured["ids"] = list(ids)
+        return SpeakerGroup(group_id="g1", name="Group", coordinator_id=ids[0], member_ids=ids)
+    a.group_speakers = capture_group  # type: ignore[method-assign]
+
+    await svc.group_speakers(["fake_a:a1", "fake_a:a2"])  # should not raise
+    assert captured["ids"] == ["a1", "a2"], f"got {captured['ids']}"
