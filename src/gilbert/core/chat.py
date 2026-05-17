@@ -28,6 +28,18 @@ GILBERT_MENTION_USER_ID = "gilbert"
 # bare-name match) still triggers the AI but isn't a structured mention.
 _MENTION_RE = re.compile(r"@\[([^\]\n]+)\]\(([A-Za-z0-9._:-]+)\)")
 
+# Bare-name mention pattern for post-processing AI replies. The SPA's
+# picker writes structured tags directly, but Gilbert composes plain
+# prose like ``@Root`` — we rewrite those to ``@[Root](root)`` on the
+# way out so the chip + notification machinery treats them the same
+# as user-initiated mentions.
+#
+# ``(?<![\w@])`` rejects in-word ``@`` so an email address like
+# ``alice@example.com`` doesn't accidentally trigger; also rejects
+# ``@@Name`` and the second ``@`` of a typo. Capture group 2 is the
+# bare display name; matched case-insensitively against room members.
+_BARE_MENTION_RE = re.compile(r"(?<![\w@])@(\w[\w.\-]*)")
+
 
 def check_conversation_access(
     data: dict[str, Any],
@@ -99,6 +111,64 @@ def filter_mentions_to_members(
         if uid in member_user_ids:
             valid.append(uid)
     return valid, mentions_g
+
+
+def resolve_bare_mentions_to_structured(
+    content: str,
+    members: list[dict[str, Any]],
+) -> tuple[str, list[str]]:
+    """Rewrite bare ``@Name`` to ``@[Name](user_id)`` for known members.
+
+    The mention picker on the SPA writes structured tags directly,
+    but the AI's reply text is free-form prose — it'll happily write
+    ``@Root`` as plain words. This helper closes the loop: scan an
+    AI reply for bare ``@Name`` tokens, match them case-insensitively
+    against the room's members + ``Gilbert``, and replace each with
+    the structured tag using the member's canonical display name.
+
+    Returns ``(rewritten_content, list_of_resolved_user_ids)``.
+
+    Already-structured tags (``@[..](..)``) are left alone — the
+    regex doesn't cross over them because ``@[`` isn't matched by
+    the bare-mention pattern. Names that don't resolve to a member
+    pass through untouched as plain text — we deliberately don't
+    invent users.
+    """
+    if not content or not members:
+        # ``Gilbert`` is allowed even with an empty member list since
+        # he's not a real member; fall through to the rewrite below.
+        if not content:
+            return content, []
+
+    # Build a lookup: lowercased-name → canonical {user_id, display_name}.
+    by_lower: dict[str, dict[str, str]] = {}
+    for m in members:
+        name = str(m.get("display_name") or "").strip()
+        uid = str(m.get("user_id") or "").strip()
+        if not name or not uid:
+            continue
+        by_lower[name.lower()] = {"user_id": uid, "display_name": name}
+    # Always allow ``@Gilbert`` regardless of who's in the room.
+    by_lower.setdefault(
+        "gilbert", {"user_id": GILBERT_MENTION_USER_ID, "display_name": "Gilbert"}
+    )
+
+    resolved_ids: list[str] = []
+    seen: set[str] = set()
+
+    def _sub(match: re.Match[str]) -> str:
+        raw_name = match.group(1)
+        key = raw_name.lower()
+        target = by_lower.get(key)
+        if target is None:
+            return match.group(0)  # no resolution — leave plain
+        if target["user_id"] not in seen:
+            seen.add(target["user_id"])
+            resolved_ids.append(target["user_id"])
+        return f"@[{target['display_name']}]({target['user_id']})"
+
+    rewritten = _BARE_MENTION_RE.sub(_sub, content)
+    return rewritten, resolved_ids
 
 
 def conv_summary(

@@ -80,6 +80,21 @@ _CHAT_SPEECH_COLLECTION = "chat_speech_prefs"
 _COMPRESSION_STATE_KEY = "compression"
 _COMPRESSION_CONFIG_KEY = "compression_config"
 
+
+class _GilbertAuthor:
+    """Synthetic 'author' for notifications fired on Gilbert's behalf.
+
+    The notify-dispatch helper reads ``display_name`` and ``user_id``
+    off the author to populate the notification body + ``source_ref``.
+    When Gilbert himself @-mentions a human (in his reply text), we
+    want the recipient's toast to say "Gilbert mentioned you" rather
+    than the user who triggered the AI turn. This stand-in carries
+    the right strings without touching the real ``UserContext`` shape.
+    """
+
+    user_id = "gilbert"
+    display_name = "Gilbert"
+
 _COMPRESSION_SYSTEM_PROMPT = """\
 You are a conversation summarizer. Produce a concise, factual summary of the \
 conversation history provided.
@@ -4209,6 +4224,91 @@ class AIService(Service):
         data["messages"] = messages
         await self._storage.put(_COLLECTION, conv_id, data)
 
+    async def _postprocess_assistant_mentions(
+        self,
+        conv_id: str,
+        conv_data: dict[str, Any],
+        *,
+        author: Any,
+        response_text: str,
+    ) -> str:
+        """Rewrite bare ``@Name`` in Gilbert's reply to structured tags.
+
+        ``chat()`` persists the assistant message before returning; we
+        load the just-saved row, run the rewrite, and re-persist if
+        anything changed. We also stamp ``mentioned_user_ids`` on the
+        row and fire notifications for the humans Gilbert mentioned —
+        a Gilbert-said-your-name is no less a ping than a human one.
+
+        Returns the rewritten ``response_text`` so the WS reply to
+        the sender carries the chip-friendly form right away (without
+        it the user who triggered the AI would see plain ``@Root``
+        until the next history reload).
+        """
+        if self._storage is None or not response_text:
+            return response_text
+        from gilbert.core.chat import (
+            extract_mentions,
+            resolve_bare_mentions_to_structured,
+        )
+
+        members = conv_data.get("members", []) or []
+        rewritten, resolved_ids = resolve_bare_mentions_to_structured(
+            response_text, members
+        )
+        if rewritten == response_text and not resolved_ids:
+            return response_text
+
+        # Update the persisted assistant row. Walk backwards so
+        # intervening tool-result rows from a multi-round turn don't
+        # confuse the find-by-author check.
+        data = await self._storage.get(_COLLECTION, conv_id)
+        if data is None:
+            return rewritten
+        messages: list[dict[str, Any]] = data.get("messages", [])
+        for idx in range(len(messages) - 1, -1, -1):
+            row = messages[idx]
+            if row.get("role") != "assistant":
+                continue
+            if not row.get("content"):
+                continue
+            row["content"] = rewritten
+            # Strip the Gilbert pseudo-id — humans get notified, not
+            # the AI mentioning itself.
+            row["mentioned_user_ids"] = [
+                uid for uid in resolved_ids if uid != "gilbert"
+            ]
+            break
+        else:
+            return rewritten
+        data["messages"] = messages
+        await self._storage.put(_COLLECTION, conv_id, data)
+
+        # Notify the humans Gilbert mentioned. Same filtering rules
+        # as the user-message path: exclude self and the pseudo-id.
+        author_id = getattr(author, "user_id", "")
+        notify_ids = [
+            uid
+            for uid in resolved_ids
+            if uid != "gilbert" and uid != author_id
+        ]
+        # We re-extract from the rewritten content to be tolerant of
+        # any structured tags the AI happened to produce on its own.
+        already_structured = set(extract_mentions(rewritten))
+        notify_ids = [uid for uid in notify_ids if uid in already_structured]
+        if notify_ids:
+            await self._notify_mentioned_users(
+                conv_data,
+                # The mention came from Gilbert. Synthesise a
+                # minimal "author" object so the notification body
+                # reads "Gilbert mentioned you in <room>: ..." rather
+                # than the human who triggered the turn.
+                _GilbertAuthor(),
+                notify_ids,
+                rewritten,
+            )
+        return rewritten
+
     async def _notify_mentioned_users(
         self,
         conv_data: dict[str, Any],
@@ -5909,6 +6009,19 @@ class AIService(Service):
                 if addressed and mentioned_ids:
                     await self._stamp_mentions_on_last_user_message(
                         conv_id, conn.user_ctx.user_id, mentioned_ids
+                    )
+
+                # Rewrite bare ``@Name`` in Gilbert's reply to the
+                # structured tag form so the SPA renders chips and
+                # mentioned humans get notified. The AI writes prose,
+                # not markup — this closes that gap deterministically
+                # rather than relying on prompt-following.
+                if addressed and response_text:
+                    response_text = await self._postprocess_assistant_mentions(
+                        conv_id,
+                        conv_data,
+                        author=conn.user_ctx,
+                        response_text=response_text,
                     )
 
                 # Fan-out notifications to mentioned users. Best-effort

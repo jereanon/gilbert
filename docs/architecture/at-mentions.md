@@ -32,8 +32,12 @@ Stored inline in message content as a markdown-link variant:
 1. Builds the room's member id set.
 2. Calls `filter_mentions_to_members(message, member_ids)` — returns `(valid_user_ids, mentions_gilbert_tag)`. Mentions pointing at non-members or self are silently dropped (a stale picker shouldn't fail the whole send).
 3. **Non-addressed path** (no Gilbert mention, no slash command): builds the `Message` directly with `mentioned_user_ids=mentioned_ids`.
-4. **Addressed path** (`mentions_gilbert()` or slash command): `chat()` builds and persists the `Message` internally without knowing about mentions; after it returns, `_stamp_mentions_on_last_user_message` retroactively writes the list onto the row.
+4. **Addressed path** (`mentions_gilbert()` or slash command): `chat()` builds and persists the `Message` internally without knowing about mentions; after it returns, `_stamp_mentions_on_last_user_message` retroactively writes the list onto the row. **Then** `_postprocess_assistant_mentions` rewrites the AI's reply: bare `@Name` tokens that match a room member (case-insensitive on display_name) become `@[Name](user_id)` with the member's canonical casing, the assistant message's content + `mentioned_user_ids` get updated, and humans Gilbert addressed are notified just like a human author had mentioned them. The rewritten reply is what comes back to the sender's WS response so the chip renders immediately (no plain-text-flash until next history reload).
 5. Either way, `_notify_mentioned_users` fires a `notification.received` event per mentioned user (best-effort — exceptions logged at debug, not raised; the primary save already succeeded).
+
+### AI-authored mentions
+
+`resolve_bare_mentions_to_structured(content, members)` (in `core/chat.py`) is the post-processor for Gilbert's prose. Gilbert writes "@Root, what's up" — the picker that translates names into structured tags is on the SPA side and Gilbert doesn't use it. The rewrite is deterministic (regex + member lookup), idempotent on already-structured content, case-insensitive matching with canonical-casing output, and always accepts `@Gilbert` regardless of whether Gilbert is a member. Names that don't resolve to a known member pass through as plain text — we don't invent users from typos. In-word `@` (`alice@example.com`) is skipped via `(?<![\w@])` negative lookbehind.
 
 ### Notification payload
 

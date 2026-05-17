@@ -15,6 +15,7 @@ from gilbert.core.chat import (
     extract_mentions,
     filter_mentions_to_members,
     mentions_gilbert,
+    resolve_bare_mentions_to_structured,
 )
 
 # --- extract_mentions ---
@@ -207,3 +208,100 @@ def test_conv_summary_handles_missing_member_entry_for_viewer() -> None:
 
 def test_gilbert_mention_user_id_constant() -> None:
     assert GILBERT_MENTION_USER_ID == "gilbert"
+
+
+# --- resolve_bare_mentions_to_structured ---
+
+_TEST_MEMBERS = [
+    {"user_id": "root", "display_name": "Root"},
+    {"user_id": "alice-1", "display_name": "Alice"},
+]
+
+
+def test_resolve_rewrites_bare_mention_to_structured() -> None:
+    out, ids = resolve_bare_mentions_to_structured(
+        "@Root what's up bro!", _TEST_MEMBERS
+    )
+    assert out == "@[Root](root) what's up bro!"
+    assert ids == ["root"]
+
+
+def test_resolve_uses_canonical_display_name_casing() -> None:
+    # Member is "Root" but Gilbert wrote "@root" lowercase — rewrite
+    # uses the canonical casing so the chip reads consistently.
+    out, ids = resolve_bare_mentions_to_structured(
+        "thanks @root", _TEST_MEMBERS
+    )
+    assert out == "thanks @[Root](root)"
+    assert ids == ["root"]
+
+
+def test_resolve_multiple_mentions_in_one_message() -> None:
+    out, ids = resolve_bare_mentions_to_structured(
+        "@Root and @Alice please", _TEST_MEMBERS
+    )
+    assert out == "@[Root](root) and @[Alice](alice-1) please"
+    assert ids == ["root", "alice-1"]
+
+
+def test_resolve_leaves_unknown_names_alone() -> None:
+    out, ids = resolve_bare_mentions_to_structured(
+        "hi @Stranger come look", _TEST_MEMBERS
+    )
+    assert out == "hi @Stranger come look"
+    assert ids == []
+
+
+def test_resolve_skips_already_structured_tags() -> None:
+    # ``@[Alice](alice-1)`` doesn't match the bare regex — the rewrite
+    # is idempotent on already-structured content.
+    content = "see @[Alice](alice-1), thanks @Root"
+    out, ids = resolve_bare_mentions_to_structured(content, _TEST_MEMBERS)
+    assert out == "see @[Alice](alice-1), thanks @[Root](root)"
+    # ``ids`` only carries the newly-resolved mentions; the
+    # already-structured one was untouched.
+    assert ids == ["root"]
+
+
+def test_resolve_ignores_in_word_at_for_email_addresses() -> None:
+    out, ids = resolve_bare_mentions_to_structured(
+        "send a copy to alice@example.com please", _TEST_MEMBERS
+    )
+    assert out == "send a copy to alice@example.com please"
+    assert ids == []
+
+
+def test_resolve_handles_punctuation_after_name() -> None:
+    out, ids = resolve_bare_mentions_to_structured(
+        "@Root, can you check?", _TEST_MEMBERS
+    )
+    assert out == "@[Root](root), can you check?"
+    assert ids == ["root"]
+
+
+def test_resolve_dedupes_repeated_mentions() -> None:
+    out, ids = resolve_bare_mentions_to_structured(
+        "@Root @Root @Root", _TEST_MEMBERS
+    )
+    assert out == "@[Root](root) @[Root](root) @[Root](root)"
+    assert ids == ["root"]  # one entry in the resolved-id list
+
+
+def test_resolve_always_accepts_at_gilbert_even_when_no_members() -> None:
+    out, ids = resolve_bare_mentions_to_structured("@Gilbert please", [])
+    assert out == "@[Gilbert](gilbert) please"
+    assert ids == ["gilbert"]
+
+
+def test_resolve_empty_content() -> None:
+    out, ids = resolve_bare_mentions_to_structured("", _TEST_MEMBERS)
+    assert out == ""
+    assert ids == []
+
+
+def test_resolve_no_mentions_in_content() -> None:
+    out, ids = resolve_bare_mentions_to_structured(
+        "just plain text here", _TEST_MEMBERS
+    )
+    assert out == "just plain text here"
+    assert ids == []
