@@ -5,6 +5,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useEventBus } from "@/hooks/useEventBus";
 import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { useBrowserNotifications } from "@/hooks/useBrowserNotifications";
 import type {
   ChatRound,
   ChatRoundTool,
@@ -59,9 +60,14 @@ import { ChatSpeechToggle } from "@/components/chat/ChatSpeechToggle";
 export function ChatPage() {
   const { user } = useAuth();
   const api = useWsApi();
-  const { connected } = useWebSocket();
+  const { connected, rpc } = useWebSocket();
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  // Browser-native @-mention notifications. The hook owns its own
+  // ``notification.received`` subscription; we only feed it the
+  // active conversation so it can skip notifications for messages
+  // in the room the user is already looking at.
+  useBrowserNotifications({ activeConversationId: activeConvId });
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [uiBlocks, setUiBlocks] = useState<UIBlock[]>([]);
   const [sending, setSending] = useState(false);
@@ -118,6 +124,21 @@ export function ChatPage() {
   useEffect(() => {
     activeConvIdRef.current = activeConvId;
   }, [activeConvId]);
+
+  // Reset the user's "unread mentions" cursor when they open a room.
+  // Fire-and-forget — a failure just means the sidebar badge stays
+  // until the next ``chat.conversation.list`` refresh. Personal
+  // conversations don't have mention tracking so we skip them.
+  useEffect(() => {
+    if (!activeConvId || !connected || !isShared) return;
+    void rpc({
+      type: "chat.conversation.mark_mentions_read",
+      conversation_id: activeConvId,
+    } as Record<string, unknown>).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.debug("mark_mentions_read failed", err);
+    });
+  }, [activeConvId, connected, isShared]);
 
   // Keep pendingCountRef in sync so addFiles can read the current count
   // without taking pendingAttachments as a callback dep (that would
@@ -1266,6 +1287,14 @@ export function ChatPage() {
             backends={modelsData?.backends}
             modelSelection={modelSelection}
             onModelChange={setModelSelection}
+            mentionableMembers={
+              isShared
+                ? members.map((m) => ({
+                    user_id: m.user_id,
+                    display_name: m.display_name,
+                  }))
+                : undefined
+            }
           />
         )}
 

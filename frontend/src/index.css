@@ -390,6 +390,24 @@
     font-family: var(--font-mono);
 }
 
+/* @-mention chip — neutral by default, signal-amber when it points
+   at the current viewer. The ``.mention-self`` class is added at
+   mount time by MarkdownContent's effect (we can't bake a per-user
+   attribute-value selector into static CSS). */
+.markdown-content .mention {
+    display: inline-block;
+    padding: 0.05em 0.4em;
+    border-radius: 4px;
+    background: var(--muted);
+    color: var(--foreground);
+    font-weight: 500;
+}
+
+.markdown-content .mention-self {
+    background: var(--signal);
+    color: var(--signal-foreground);
+}
+
 .markdown-content pre {
     background: oklch(0.13 0 0);
     color: oklch(0.92 0 0);

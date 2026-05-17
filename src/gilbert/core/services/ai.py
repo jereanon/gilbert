@@ -1228,7 +1228,9 @@ class AIService(Service):
                 }
             ),
             requires=frozenset({"entity_storage"}),
-            optional=frozenset({"ai_tools", "configuration", "access_control"}),
+            optional=frozenset(
+                {"ai_tools", "configuration", "access_control", "notifications", "users"}
+            ),
             events=frozenset({"chat.conversation.renamed"}),
             toggleable=True,
             toggle_description="AI chat and tool execution",
@@ -4176,6 +4178,89 @@ class AIService(Service):
             return []
         return [self._deserialize_message(m) for m in data.get("messages", [])]
 
+    async def _stamp_mentions_on_last_user_message(
+        self,
+        conv_id: str,
+        author_id: str,
+        mentioned_user_ids: list[str],
+    ) -> None:
+        """Attach a mention list to the most recently-persisted user row.
+
+        Used by the AI-chat path on the send handler: ``chat()`` builds
+        and saves the user's Message internally without knowing about
+        mentions, so we run this after it returns to retroactively
+        record who was @-mentioned. Find-by-author keeps us robust to
+        future cases where assistant tool-results land between the
+        user message and ``chat()``'s return.
+        """
+        if self._storage is None or not mentioned_user_ids:
+            return
+        data = await self._storage.get(_COLLECTION, conv_id)
+        if not data:
+            return
+        messages: list[dict[str, Any]] = data.get("messages", [])
+        for idx in range(len(messages) - 1, -1, -1):
+            row = messages[idx]
+            if row.get("role") == "user" and row.get("author_id", "") == author_id:
+                row["mentioned_user_ids"] = list(mentioned_user_ids)
+                break
+        else:
+            return
+        data["messages"] = messages
+        await self._storage.put(_COLLECTION, conv_id, data)
+
+    async def _notify_mentioned_users(
+        self,
+        conv_data: dict[str, Any],
+        author: Any,
+        mentioned_user_ids: list[str],
+        raw_message: str,
+    ) -> None:
+        """Fire a ``notification.received`` for each @-mentioned user.
+
+        Best-effort — a notify_user exception (storage glitch, event
+        bus down) is logged at debug and swallowed; the message itself
+        is already persisted. ``source_ref`` carries the conversation
+        id so the SPA can deep-link from the bell / OS notification.
+        """
+        if self._resolver is None or not mentioned_user_ids:
+            return
+        notifications_svc = self._resolver.get_capability("notifications")
+        if notifications_svc is None:
+            return
+        notify_fn = getattr(notifications_svc, "notify_user", None)
+        if notify_fn is None:
+            return
+        conv_id = conv_data.get("_id", "")
+        title = conv_data.get("title") or "Shared Room"
+        author_name = getattr(author, "display_name", "") or "Someone"
+        # Strip the @[...]() syntax for the notification body — keep
+        # the prose readable on a system-level toast where the user
+        # can't see the rendered chip.
+        from gilbert.core.chat import _MENTION_RE
+
+        snippet = _MENTION_RE.sub(lambda m: "@" + m.group(1), raw_message).strip()
+        if len(snippet) > 120:
+            snippet = snippet[:117] + "..."
+        body = f"{author_name} mentioned you in {title}: {snippet}"
+        for uid in mentioned_user_ids:
+            try:
+                await notify_fn(
+                    user_id=uid,
+                    message=body,
+                    source="chat.mention",
+                    source_ref={
+                        "conversation_id": conv_id,
+                        "author_id": getattr(author, "user_id", ""),
+                        "author_name": author_name,
+                    },
+                )
+            except Exception:
+                logger.debug(
+                    "chat.mention notification dispatch failed for %s", uid,
+                    exc_info=True,
+                )
+
     @staticmethod
     def _serialize_message(msg: Message) -> dict[str, Any]:
         d: dict[str, Any] = {"role": msg.role.value, "content": msg.content}
@@ -4238,6 +4323,8 @@ class AIService(Service):
             d["interrupted"] = True
         if msg.usage:
             d["usage"] = msg.usage
+        if msg.mentioned_user_ids:
+            d["mentioned_user_ids"] = list(msg.mentioned_user_ids)
         return d
 
     @staticmethod
@@ -4310,6 +4397,11 @@ class AIService(Service):
             attachments=attachments,
             interrupted=bool(data.get("interrupted", False)),
             usage=usage,
+            mentioned_user_ids=[
+                str(uid)
+                for uid in (data.get("mentioned_user_ids") or [])
+                if uid
+            ],
         )
 
     # --- Conversation State ---
@@ -5575,6 +5667,7 @@ class AIService(Service):
             "chat.conversation.create": self._ws_conversation_create,
             "chat.conversation.rename": self._ws_conversation_rename,
             "chat.conversation.delete": self._ws_conversation_delete,
+            "chat.conversation.mark_mentions_read": self._ws_mark_mentions_read,
             "chat.room.create": self._ws_room_create,
             "chat.room.join": self._ws_room_join,
             "chat.room.leave": self._ws_room_leave,
@@ -5731,7 +5824,12 @@ class AIService(Service):
         reply_turn_usage: dict[str, Any] | None = None
         try:
             if is_shared:
-                from gilbert.core.chat import build_room_context, mentions_gilbert, publish_event
+                from gilbert.core.chat import (
+                    build_room_context,
+                    filter_mentions_to_members,
+                    mentions_gilbert,
+                    publish_event,
+                )
 
                 # ``is_shared`` was set from ``conv_data.get("shared")``
                 # so we know conv_data is a dict at this point.
@@ -5740,6 +5838,23 @@ class AIService(Service):
 
                 addressed = mentions_gilbert(message) or is_slash_command
                 tagged_message = f"[{conn.user_ctx.display_name}]: {message}"
+
+                # Validate mentions against the room's member list.
+                # Bad-id mentions are silently dropped (no error path —
+                # a stale picker shouldn't fail the whole send), and
+                # the user's own id is filtered so self-mention isn't
+                # a real mention for notification purposes.
+                room_member_ids = {
+                    str(m.get("user_id", ""))
+                    for m in conv_data.get("members", [])
+                    if m.get("user_id")
+                }
+                mentioned_ids, mentions_gilbert_tag = filter_mentions_to_members(
+                    message, room_member_ids
+                )
+                mentioned_ids = [
+                    uid for uid in mentioned_ids if uid != conn.user_ctx.user_id
+                ]
 
                 response_text = ""
                 ui_blocks: list[dict[str, Any]] = []
@@ -5782,9 +5897,33 @@ class AIService(Service):
                             author_id=conn.user_ctx.user_id,
                             author_name=conn.user_ctx.display_name,
                             attachments=list(attachments),
+                            mentioned_user_ids=list(mentioned_ids),
                         )
                     )
                     await self._save_conversation(conv_id, messages, user_ctx=conn.user_ctx)
+
+                # When the AI path persisted the user message, stamp
+                # the resolved mention list onto it post-hoc so the
+                # ``chat()`` plumbing doesn't have to grow a new arg.
+                # No-op when there were no valid mentions.
+                if addressed and mentioned_ids:
+                    await self._stamp_mentions_on_last_user_message(
+                        conv_id, conn.user_ctx.user_id, mentioned_ids
+                    )
+
+                # Fan-out notifications to mentioned users. Best-effort
+                # — a notify_user failure shouldn't fail the send.
+                # Self-mentions were already filtered out of
+                # ``mentioned_ids``; Gilbert mentions don't notify
+                # anyone (the existing addressed-path handles those
+                # by invoking the AI).
+                if mentioned_ids:
+                    await self._notify_mentioned_users(
+                        conv_data,
+                        conn.user_ctx,
+                        mentioned_ids,
+                        message,
+                    )
 
                 # Broadcast to room members
                 gilbert = conn.manager.gilbert
@@ -6588,13 +6727,70 @@ class AIService(Service):
         personal = await self.list_conversations(user_id=conn.user_id, limit=30)
         shared = await self.list_shared_conversations(user_id=conn.user_id, limit=30)
 
-        conversations = [conv_summary(c, shared=True) for c in shared]
-        conversations += [conv_summary(c, shared=False) for c in personal]
+        conversations = [
+            conv_summary(c, shared=True, viewer_user_id=conn.user_id) for c in shared
+        ]
+        conversations += [
+            conv_summary(c, shared=False, viewer_user_id=conn.user_id) for c in personal
+        ]
 
         return {
             "type": "chat.conversation.list.result",
             "ref": frame.get("id"),
             "conversations": conversations,
+        }
+
+    async def _ws_mark_mentions_read(
+        self, conn: WsConnectionBase, frame: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Reset the caller's unread-mentions cursor for a conversation.
+
+        Stores ``last_read_mention_index`` on the caller's member entry,
+        set to the index of the most-recent message at the time of
+        the call. ``conv_summary`` reads this cursor when computing
+        ``unread_mentions_count`` for the sidebar. Self-only — the
+        cursor for a different user can't be moved from a frame.
+        """
+        conversation_id = (frame.get("conversation_id") or "").strip()
+        if not conversation_id:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "conversation_id is required",
+                "code": 400,
+            }
+        if self._storage is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Storage not available",
+                "code": 503,
+            }
+        data = await self._storage.get(_COLLECTION, conversation_id)
+        if data is None:
+            return {
+                "type": "gilbert.error",
+                "ref": frame.get("id"),
+                "error": "Conversation not found",
+                "code": 404,
+            }
+        members = data.get("members") or []
+        last_index = len(data.get("messages") or []) - 1
+        updated = False
+        for m in members:
+            if m.get("user_id") == conn.user_id:
+                if m.get("last_read_mention_index") != last_index:
+                    m["last_read_mention_index"] = last_index
+                    updated = True
+                break
+        if updated:
+            data["members"] = members
+            await self._storage.put(_COLLECTION, conversation_id, data)
+        return {
+            "type": "gilbert.result",
+            "ref": frame.get("id"),
+            "conversation_id": conversation_id,
+            "last_read_mention_index": last_index,
         }
 
     async def _ws_conversation_rename(

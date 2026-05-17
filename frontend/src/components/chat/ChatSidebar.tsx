@@ -76,7 +76,30 @@ export function ChatSidebarContent({
                   {isInvited && (
                     <MailIcon className="size-3.5 text-primary shrink-0" />
                   )}
-                  <span className="flex-1 truncate">{conv.title}</span>
+                  <span
+                    className={`flex-1 truncate ${
+                      (conv.unread_mentions_count ?? 0) > 0
+                        ? "font-semibold"
+                        : ""
+                    }`}
+                  >
+                    {conv.title}
+                  </span>
+                  {/* @-mention indicator: signal-amber pill with the
+                      count. Sits before the member-count badge so the
+                      "you've been pinged" signal lands first in scan
+                      order. */}
+                  {(conv.unread_mentions_count ?? 0) > 0 && (
+                    <Badge
+                      variant="default"
+                      className="bg-signal text-signal-foreground text-[10px] px-1.5"
+                      title={`${conv.unread_mentions_count} unread @-mention${
+                        conv.unread_mentions_count === 1 ? "" : "s"
+                      }`}
+                    >
+                      @{conv.unread_mentions_count}
+                    </Badge>
+                  )}
                   {conv.member_count !== undefined && !isInvited && (
                     <Badge variant="secondary" className="text-[10px] px-1.5">
                       {conv.member_count}

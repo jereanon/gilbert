@@ -12,6 +12,22 @@ from gilbert.interfaces.events import Event, EventBusProvider
 
 _GILBERT_MENTION = re.compile(r"\bgilbert\b", re.IGNORECASE)
 
+# Pseudo-user id reserved for Gilbert (the AI) in @-mention markup.
+# Gilbert isn't a row in the user table — assistant messages carry an
+# empty ``author_id`` — but the mention picker surfaces him as a chip
+# alongside humans so the syntax is symmetric. Treat this id as a
+# "yes, the AI was addressed" hint, not a routable user_id.
+GILBERT_MENTION_USER_ID = "gilbert"
+
+# Markdown-link-shaped mention syntax stored in message content:
+#     @[Display Name](user_id)
+# The display name is purely cosmetic — the SPA shows whatever is in
+# the brackets — and the user_id is the stable identifier the picker
+# resolved to at insert time. A Marked.js extension on the SPA side
+# parses this into a styled chip. Plain ``@gilbert`` (the legacy
+# bare-name match) still triggers the AI but isn't a structured mention.
+_MENTION_RE = re.compile(r"@\[([^\]\n]+)\]\(([A-Za-z0-9._:-]+)\)")
+
 
 def check_conversation_access(
     data: dict[str, Any],
@@ -44,8 +60,63 @@ def check_conversation_access(
     return None
 
 
-def conv_summary(c: dict[str, Any], *, shared: bool) -> dict[str, Any]:
-    """Build a lightweight conversation summary for the sidebar."""
+def extract_mentions(content: str) -> list[str]:
+    """Return user ids @-mentioned in ``content``, in document order.
+
+    Deduplicates while preserving order so the sidebar / notification
+    layers see one entry per addressed user even if a message mentions
+    them twice. The pseudo-id ``gilbert`` (see ``GILBERT_MENTION_USER_ID``)
+    is included as-is — callers that don't care about AI mentions
+    should filter it out.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for match in _MENTION_RE.finditer(content or ""):
+        uid = match.group(2)
+        if uid and uid not in seen:
+            seen.add(uid)
+            result.append(uid)
+    return result
+
+
+def filter_mentions_to_members(
+    content: str, member_user_ids: set[str]
+) -> tuple[list[str], bool]:
+    """Validate extracted mentions against a room's member list.
+
+    Returns ``(valid_user_ids, mentions_gilbert_via_tag)``. Mentions
+    that point at non-members are silently dropped — a user can't
+    @-mention someone who isn't in the room. The Gilbert pseudo-id
+    is always accepted (he's not in any room's member list but the
+    SPA picker should still surface him).
+    """
+    valid: list[str] = []
+    mentions_g = False
+    for uid in extract_mentions(content):
+        if uid == GILBERT_MENTION_USER_ID:
+            mentions_g = True
+            continue
+        if uid in member_user_ids:
+            valid.append(uid)
+    return valid, mentions_g
+
+
+def conv_summary(
+    c: dict[str, Any],
+    *,
+    shared: bool,
+    viewer_user_id: str = "",
+) -> dict[str, Any]:
+    """Build a lightweight conversation summary for the sidebar.
+
+    When ``viewer_user_id`` is provided the result includes
+    ``unread_mentions_count`` — the number of messages newer than that
+    viewer's ``last_read_mention_index`` cursor that mention them.
+    Cursor lives on the member entry (set by
+    ``chat.conversation.mark_mentions_read``). When the viewer isn't
+    a member, or no cursor exists yet, the count starts from message
+    index 0 — i.e. every unread mention counts.
+    """
     messages = c.get("messages", [])
     preview = ""
     for m in messages:
@@ -76,12 +147,41 @@ def conv_summary(c: dict[str, Any], *, shared: bool) -> dict[str, Any]:
         summary["visibility"] = c.get("visibility", "public")
         summary["is_member"] = c.get("_is_member", True)
         summary["is_invited"] = c.get("_is_invited", False)
+
+    # Per-viewer unread mention count. Index-based cursor (not
+    # timestamp) because messages don't carry per-row created_at
+    # timestamps today — the index of the message in ``messages[]``
+    # is the source of truth for "newer than what I've seen."
+    if viewer_user_id:
+        cursor = -1
+        for m in c.get("members", []):
+            if m.get("user_id") == viewer_user_id:
+                raw = m.get("last_read_mention_index")
+                cursor = int(raw) if isinstance(raw, int) else -1
+                break
+        unread = 0
+        for idx, msg in enumerate(messages):
+            if idx <= cursor:
+                continue
+            mentioned = msg.get("mentioned_user_ids") or []
+            if viewer_user_id in mentioned and msg.get("author_id") != viewer_user_id:
+                unread += 1
+        summary["unread_mentions_count"] = unread
     return summary
 
 
 def mentions_gilbert(message: str) -> bool:
-    """Check if a message addresses Gilbert by name."""
-    return bool(_GILBERT_MENTION.search(message))
+    """Check if a message addresses Gilbert.
+
+    Triggers on either the legacy bare-name regex (``\\bgilbert\\b``) or
+    the structured ``@[Gilbert](gilbert)`` mention syntax. Used by the
+    AI-chat path in shared rooms to decide whether to actually invoke
+    the AI on a message or just persist it — bare-name detection stays
+    so users can keep typing ``gilbert, what about...`` naturally.
+    """
+    if _GILBERT_MENTION.search(message):
+        return True
+    return GILBERT_MENTION_USER_ID in extract_mentions(message)
 
 
 _RE_FENCED_CODE = re.compile(r"```.*?```", re.DOTALL)
