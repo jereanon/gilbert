@@ -17,14 +17,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from gilbert.interfaces.auth import AccessControlProvider
+from gilbert.interfaces.auth import AccessControlProvider, UserContext
 from gilbert.interfaces.configuration import (
     ConfigAction,
     ConfigActionResult,
     ConfigParam,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
-from gilbert.interfaces.tools import ToolParameterType
+from gilbert.interfaces.tools import ToolDefinition, ToolParameter, ToolParameterType
 from gilbert.interfaces.transcription import (
     BatchTranscriptionBackend,
     StreamConfig,
@@ -515,6 +515,174 @@ class TranscriptionService(Service):
             raise
         except Exception:  # noqa: BLE001
             logger.exception("transcription pump error for session %s", rec.session_id)
+
+    # --- ToolProvider --------------------------------------------
+
+    @property
+    def tool_provider_name(self) -> str:
+        return "transcription"
+
+    def get_tools(self, user_ctx: UserContext | None = None) -> list[ToolDefinition]:
+        if not self._enabled:
+            return []
+        return [
+            ToolDefinition(
+                name="transcribe",
+                slash_group="transcription",
+                slash_command="transcribe",
+                slash_help='Transcribe an audio file: /transcription transcribe "<path or url>"',
+                description=(
+                    "Transcribe audio from a file path or URL. Writes the "
+                    "transcript to an output file and returns the text plus "
+                    "per-segment timings."
+                ),
+                parameters=[
+                    ToolParameter(
+                        name="source",
+                        type=ToolParameterType.STRING,
+                        description="Path to a local audio file, or an http(s) URL.",
+                    ),
+                    ToolParameter(
+                        name="language",
+                        type=ToolParameterType.STRING,
+                        description="Optional language hint (BCP-47, e.g. 'en').",
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="diarize",
+                        type=ToolParameterType.BOOLEAN,
+                        description="Attempt speaker diarization if the backend supports it.",
+                        required=False,
+                    ),
+                    ToolParameter(
+                        name="backend",
+                        type=ToolParameterType.STRING,
+                        description="Override the default batch backend by name.",
+                        required=False,
+                    ),
+                ],
+                required_role="everyone",
+                parallel_safe=True,
+            ),
+            ToolDefinition(
+                name="backends",
+                slash_group="transcription",
+                slash_command="backends",
+                slash_help="List loaded transcription backends: /transcription backends [role]",
+                description="List currently-loaded transcription backends per role.",
+                parameters=[
+                    ToolParameter(
+                        name="role",
+                        type=ToolParameterType.STRING,
+                        description="Optional role filter: batch | streaming | wake_word.",
+                        required=False,
+                    ),
+                ],
+                required_role="everyone",
+                parallel_safe=True,
+            ),
+            ToolDefinition(
+                name="languages",
+                slash_group="transcription",
+                slash_command="languages",
+                slash_help="List supported languages: /transcription languages [backend]",
+                description="Best-effort list of supported language codes for a batch backend.",
+                parameters=[
+                    ToolParameter(
+                        name="backend",
+                        type=ToolParameterType.STRING,
+                        description="Backend name (defaults to the configured batch default).",
+                        required=False,
+                    ),
+                ],
+                required_role="everyone",
+                parallel_safe=True,
+            ),
+        ]
+
+    async def execute_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        match name:
+            case "transcribe":
+                return await self._tool_transcribe(arguments)
+            case "backends":
+                return await self._tool_backends(arguments)
+            case "languages":
+                return await self._tool_languages(arguments)
+            case _:
+                raise KeyError(f"Unknown tool: {name}")
+
+    async def _tool_transcribe(self, arguments: dict[str, Any]) -> str:
+        import json
+        import uuid
+        from pathlib import Path
+
+        from gilbert.core.output import cleanup_old_files, get_output_dir
+        from gilbert.interfaces.transcription import (
+            AudioEncoding,
+            AudioFormat,
+            TranscriptionRequest,
+        )
+
+        source = arguments["source"]
+        language = arguments.get("language")
+        diarize = bool(arguments.get("diarize", False))
+        backend = arguments.get("backend") or None
+
+        # Fetch the bytes.
+        if source.startswith("http://") or source.startswith("https://"):
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(source)
+                resp.raise_for_status()
+                audio = resp.content
+        else:
+            audio = Path(source).read_bytes()
+
+        request = TranscriptionRequest(
+            audio=audio,
+            format=AudioFormat(AudioEncoding.AUTO),
+            language=language,
+            diarize=diarize,
+        )
+        result = await self.transcribe(request, backend=backend)
+
+        out_dir = get_output_dir("transcription")
+        cleanup_old_files(out_dir, self._output_ttl_seconds)
+        out_path = out_dir / f"{uuid.uuid4().hex}.txt"
+        out_path.write_text(result.text)
+
+        return json.dumps({
+            "file_path": str(out_path),
+            "text": result.text,
+            "segments": [
+                {
+                    "text": s.text,
+                    "start": s.start_seconds,
+                    "end": s.end_seconds,
+                    "speaker_label": s.speaker_label,
+                    "confidence": s.confidence,
+                }
+                for s in result.segments
+            ],
+            "language": result.language,
+            "duration_seconds": result.duration_seconds,
+        })
+
+    async def _tool_backends(self, arguments: dict[str, Any]) -> str:
+        import json
+
+        role = arguments.get("role")
+        return json.dumps(self.list_backends(role))
+
+    async def _tool_languages(self, arguments: dict[str, Any]) -> str:
+        import json
+
+        backend_name = arguments.get("backend") or self._default_batch
+        if not backend_name or backend_name not in self._batch_backends:
+            return json.dumps([])
+        langs = await self._batch_backends[backend_name].list_languages()
+        return json.dumps(langs)
 
     # --- Lifecycle ------------------------------------------------
 

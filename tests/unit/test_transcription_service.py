@@ -593,3 +593,46 @@ async def test_two_concurrent_sessions_do_not_cross_talk():
     assert all(m["session_id"] == rb["session_id"] for m in b.enqueued)
     await svc._handle_close_session(a, {"session_id": ra["session_id"]})
     await svc._handle_close_session(b, {"session_id": rb["session_id"]})
+
+
+# --- ToolProvider tests (Task 11) ---
+
+
+def test_tool_provider_lists_three_tools_with_slash_group():
+    from gilbert.core.services.transcription import TranscriptionService
+
+    svc = TranscriptionService()
+    svc._enabled = True
+    tools = svc.get_tools()
+    names = [t.name for t in tools]
+    assert names == ["transcribe", "backends", "languages"]
+    for t in tools:
+        assert t.slash_group == "transcription"
+        assert t.slash_command
+        assert t.slash_help
+        assert t.required_role == "everyone"
+        assert t.parallel_safe is True
+
+
+def test_get_tools_returns_empty_when_service_disabled():
+    from gilbert.core.services.transcription import TranscriptionService
+
+    svc = TranscriptionService()
+    # _enabled defaults to False; tools should be hidden.
+    assert svc.get_tools() == []
+
+
+@pytest.mark.asyncio
+async def test_backends_tool_returns_loaded_per_role():
+    import json
+
+    from gilbert.core.services.transcription import TranscriptionService
+
+    svc = TranscriptionService()
+    svc._enabled = True
+    svc._batch_backends["_fake_batch"] = _FakeBatch()
+    out = await svc.execute_tool("backends", {})
+    data = json.loads(out)
+    assert data["batch"] == ["_fake_batch"]
+    assert data["streaming"] == []
+    assert data["wake_word"] == []
