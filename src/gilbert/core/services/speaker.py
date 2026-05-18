@@ -725,6 +725,7 @@ class SpeakerService(Service):
         volume: int | None,
         title: str,
         announce: bool,
+        kind: str = "",
         position_seconds: float | None,
         explicit_target_ids: list[str],
     ) -> None:
@@ -769,6 +770,7 @@ class SpeakerService(Service):
                         "title": title,
                         "volume": effective_volume,
                         "announce": announce,
+                        "kind": kind,
                         "position_seconds": position_seconds,
                     },
                     source="speaker.echo",
@@ -985,6 +987,7 @@ class SpeakerService(Service):
             volume=volume,
             title=title,
             announce=announce,
+            kind=kind,
             position_seconds=position_seconds,
             explicit_target_ids=target_ids,
         )

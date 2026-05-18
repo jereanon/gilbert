@@ -102,3 +102,85 @@ async def test_speaker_service_threads_kind_to_browser_backend() -> None:
         set_current_user(None)
 
     assert any(ev.data.get("kind") == "chat_speech" for ev in bus.published)
+
+
+@pytest.mark.asyncio
+async def test_speaker_service_threads_kind_through_browser_echo() -> None:
+    """When a non-browser backend is primary and the caller has an active
+    browser registration (echo opt-in), the echo event should also carry
+    the kind classifier — not just the direct-target path."""
+    from gilbert.core.services.speaker import SpeakerService
+    from gilbert.interfaces.speaker import (
+        PlayRequest as _PR,
+        PlaybackState,
+        SpeakerBackend,
+        SpeakerInfo,
+    )
+
+    class _FakePrimaryBackend(SpeakerBackend):
+        """Stand-in for a non-browser primary (e.g. Sonos). Records plays
+        but doesn't publish browser events."""
+
+        backend_name = "fake"
+        supports_grouping = False
+        supports_repeat = False
+
+        def __init__(self) -> None:
+            self.played: list[_PR] = []
+
+        async def initialize(self, config: dict) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+        async def list_speakers(self) -> list[SpeakerInfo]:
+            return [SpeakerInfo(speaker_id="primary-1", name="Primary", ip_address="")]
+
+        async def get_speaker(self, speaker_id: str) -> SpeakerInfo | None:
+            return SpeakerInfo(speaker_id="primary-1", name="Primary", ip_address="")
+
+        async def play_uri(self, request: _PR) -> None:
+            self.played.append(request)
+
+        async def stop(self, speaker_ids: list[str] | None = None) -> None:
+            pass
+
+        async def get_volume(self, speaker_id: str) -> int:
+            return 50
+
+        async def set_volume(self, speaker_id: str, volume: int) -> None:
+            pass
+
+    bus = _CapturingBus()
+    browser = BrowserSpeakerBackend()
+    browser.set_event_bus_provider(_BusProvider(bus))
+    await browser.initialize({})
+    browser.activate(conn_id="conn-1", user_id="alice", display_name="Alice")
+
+    primary = _FakePrimaryBackend()
+
+    svc = SpeakerService()
+    svc._backends = {"fake": primary, "browser": browser}  # type: ignore[attr-defined]
+    svc._primary_backend = "fake"  # type: ignore[attr-defined]
+    svc._event_bus_provider = _BusProvider(bus)  # type: ignore[attr-defined]
+
+    set_current_user(UserContext(user_id="alice", email="", display_name="Alice", roles=frozenset()))
+    try:
+        await svc.play_on_speakers(
+            uri="https://example/a.mp3",
+            speaker_ids=["fake:primary-1"],
+            kind="chat_speech",
+            title="Gilbert",
+        )
+    finally:
+        set_current_user(None)
+
+    # Primary backend received the kind.
+    assert len(primary.played) == 1
+    assert primary.played[0].kind == "chat_speech"
+
+    # Echo event was published with the kind too.
+    echo_events = [e for e in bus.published if e.data.get("user_id") == "alice"]
+    assert len(echo_events) >= 1
+    assert any(e.data.get("kind") == "chat_speech" for e in echo_events)
