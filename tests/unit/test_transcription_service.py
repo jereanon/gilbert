@@ -369,3 +369,108 @@ def test_config_actions_aggregate_from_backend_classes():
     svc._batch_backends["_fake_batch"] = _FakeBatch()
     actions = svc.config_actions()
     assert isinstance(actions, list)
+
+
+# --- WS session handler tests (Task 9) ---
+
+
+@pytest.mark.asyncio
+async def test_start_session_creates_record_and_close_drops_it():
+    from gilbert.core.services.transcription import TranscriptionService
+
+    svc = TranscriptionService()
+    svc._apply_config_section({
+        "streaming": {
+            "default": "_fake_streaming",
+            "backends": {"_fake_streaming": {"enabled": True}},
+        },
+    })
+    await svc._reinit_backends_for_role("streaming")
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.connection_id = "conn-A"
+            self.user_id = "u-1"
+            self.user_ctx = type("U", (), {
+                "user_id": "u-1", "display_name": "Bri",
+                "roles": frozenset({"everyone"}),
+            })()
+            self.display_name = "Bri"
+            self.enqueued: list[dict] = []
+            self.close_callbacks: list = []
+        def enqueue(self, msg):
+            self.enqueued.append(msg)
+        def add_close_callback(self, cb):
+            self.close_callbacks.append(cb)
+
+    conn = _Conn()
+    frame = {
+        "mode": "stream",
+        "format": {"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1},
+        "config": {"interim_results": True},
+    }
+    result = await svc._handle_start_session(conn, frame)
+    sid = result["session_id"]
+    assert sid in svc._sessions
+    assert svc._sessions[sid].conn_id == "conn-A"
+    assert svc._sessions[sid].user_id == "u-1"
+    assert svc._sessions[sid].mode == "stream"
+    # A close callback was registered so connection-drop cleans up.
+    assert len(conn.close_callbacks) == 1
+
+    await svc._handle_close_session(conn, {"session_id": sid})
+    assert sid not in svc._sessions
+
+
+@pytest.mark.asyncio
+async def test_connection_close_callback_cleans_up_sessions():
+    from gilbert.core.services.transcription import TranscriptionService
+
+    svc = TranscriptionService()
+    svc._apply_config_section({
+        "streaming": {
+            "default": "_fake_streaming",
+            "backends": {"_fake_streaming": {"enabled": True}},
+        },
+    })
+    await svc._reinit_backends_for_role("streaming")
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.connection_id = "conn-B"
+            self.user_id = "u-2"
+            self.user_ctx = type("U", (), {
+                "user_id": "u-2", "display_name": "Eve",
+                "roles": frozenset({"everyone"}),
+            })()
+            self.display_name = "Eve"
+            self.close_callbacks: list = []
+        def enqueue(self, msg): pass
+        def add_close_callback(self, cb):
+            self.close_callbacks.append(cb)
+
+    conn = _Conn()
+    r1 = await svc._handle_start_session(conn, {
+        "mode": "stream",
+        "format": {"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1},
+        "config": {},
+    })
+    r2 = await svc._handle_start_session(conn, {
+        "mode": "stream",
+        "format": {"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1},
+        "config": {},
+    })
+    assert {r1["session_id"], r2["session_id"]} <= set(svc._sessions)
+
+    # Simulate the WS connection closing: callbacks fire synchronously
+    # in arbitrary order. The service's callbacks schedule async cleanup,
+    # so we drain the loop after firing them.
+    for cb in list(conn.close_callbacks):
+        cb()
+    # Drain pending tasks
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if r1["session_id"] not in svc._sessions and r2["session_id"] not in svc._sessions:
+            break
+    assert r1["session_id"] not in svc._sessions
+    assert r2["session_id"] not in svc._sessions

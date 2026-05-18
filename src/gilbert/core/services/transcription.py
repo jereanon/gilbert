@@ -350,6 +350,103 @@ class TranscriptionService(Service):
             return all_roles
         return {role: all_roles[role]}
 
+    # --- WsHandlerProvider ---------------------------------------
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        return {
+            "transcription.start_session": self._handle_start_session,
+            "transcription.send_chunk":    self._handle_send_chunk,
+            "transcription.close_session": self._handle_close_session,
+        }
+
+    def _parse_audio_format(self, raw: dict[str, Any]) -> Any:
+        from gilbert.interfaces.transcription import AudioEncoding, AudioFormat
+
+        encoding = AudioEncoding(raw.get("encoding", "pcm_s16le"))
+        return AudioFormat(
+            encoding=encoding,
+            sample_rate=int(raw.get("sample_rate", 16000)),
+            channels=int(raw.get("channels", 1)),
+        )
+
+    async def _handle_start_session(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        """Open a browser-mic session and register a close-callback for cleanup."""
+        import uuid
+
+        from gilbert.interfaces.transcription import StreamConfig, WakeWordConfig
+
+        mode = frame.get("mode", "stream")
+        fmt = self._parse_audio_format(frame.get("format", {}))
+        backend_name = frame.get("backend")
+        sub = frame.get("config", {}) if isinstance(frame.get("config"), dict) else {}
+
+        if mode == "stream":
+            cfg = StreamConfig(
+                format=fmt,
+                language=sub.get("language"),
+                prompt=sub.get("prompt", ""),
+                diarize=bool(sub.get("diarize", False)),
+                interim_results=bool(sub.get("interim_results", True)),
+                vad_events=bool(sub.get("vad_events", True)),
+            )
+            primitive: TranscriptionStream | WakeWordDetector = await self.open_stream(
+                cfg, backend=backend_name
+            )
+        elif mode == "wake_word":
+            cfg2 = WakeWordConfig(
+                keywords=list(sub.get("keywords", [])),
+                format=fmt,
+                sensitivity=float(sub.get("sensitivity", 0.5)),
+            )
+            primitive = await self.open_detector(cfg2, backend=backend_name)
+        else:
+            return {"ok": False, "error": f"unknown session mode {mode!r}"}
+
+        session_id = uuid.uuid4().hex
+        record = _ActiveSession(
+            session_id=session_id,
+            conn_id=conn.connection_id,
+            user_id=conn.user_id or "",
+            mode=mode,
+            primitive=primitive,
+        )
+        async with self._sessions_guard:
+            self._sessions[session_id] = record
+
+        # Connection-drop cleanup. add_close_callback expects a sync
+        # callable; we schedule the async cleanup as a task. Matches
+        # SpeakerService._ws_browser_speaker_activate pattern at
+        # core/services/speaker.py:1399.
+        def _on_close(sid: str = session_id) -> None:
+            asyncio.create_task(self._close_session(sid))
+
+        conn.add_close_callback(_on_close)
+        # Pump task is created lazily on first chunk in Task 10.
+        return {"session_id": session_id}
+
+    async def _handle_close_session(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        sid = frame.get("session_id")
+        if not isinstance(sid, str):
+            return {"ok": False, "error": "missing session_id"}
+        await self._close_session(sid)
+        return {"ok": True}
+
+    async def _close_session(self, session_id: str) -> None:
+        async with self._sessions_guard:
+            rec = self._sessions.pop(session_id, None)
+        if rec is None:
+            return
+        if rec.pump_task is not None:
+            rec.pump_task.cancel()
+        try:
+            await rec.primitive.close()
+        except Exception:  # noqa: BLE001
+            logger.exception("error closing primitive for session %s", session_id)
+
+    async def _handle_send_chunk(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        # Filled in in Task 10.
+        return {"ok": False, "error": "not yet implemented"}
+
     # --- Lifecycle ------------------------------------------------
 
     async def start(self, resolver: ServiceResolver) -> None:
