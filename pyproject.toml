@@ -36,6 +36,7 @@ dependencies = [
     "gilbert-plugin-arr",
     "gilbert-plugin-bedrock",
     "gilbert-plugin-browser",
+    "gilbert-plugin-deepgram",
     "gilbert-plugin-deepseek",
     "gilbert-plugin-elevenlabs",
     "gilbert-plugin-gemini",
@@ -66,6 +67,7 @@ gilbert-plugin-anthropic = { workspace = true }
 gilbert-plugin-arr = { workspace = true }
 gilbert-plugin-bedrock = { workspace = true }
 gilbert-plugin-browser = { workspace = true }
+gilbert-plugin-deepgram = { workspace = true }
 gilbert-plugin-deepseek = { workspace = true }
 gilbert-plugin-elevenlabs = { workspace = true }
 gilbert-plugin-gemini = { workspace = true }
