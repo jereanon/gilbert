@@ -494,7 +494,6 @@ run_gilbert_supervised() {
 }
 
 build_frontend() {
-    echo "Building frontend..."
     # npm workspaces: install runs from the repo root so frontend AND
     # every plugin's frontend/ directory share a single node_modules
     # tree. Plugin TS files (under std-plugins/<name>/frontend/) can
@@ -520,6 +519,57 @@ build_frontend() {
         fi
         cd "$SCRIPT_DIR" && npm install
     fi
+
+    # Skip the (~10s) rebuild when nothing's changed under any source root
+    # we feed into Vite. Sentinel is the built SPA's index.html — last
+    # touched by the `cp -r` below on a successful build. If ANY source
+    # file under frontend/, any plugin's frontend/, or any build-config
+    # file is newer than the sentinel, rebuild. When in doubt, rebuild.
+    local sentinel="$SCRIPT_DIR/src/gilbert/web/spa/index.html"
+    local need_rebuild=true
+    if [ -f "$sentinel" ]; then
+        need_rebuild=false
+        # Find any source/config file newer than the sentinel. The
+        # ``find ... -newer SENTINEL -print -quit`` short-circuits at
+        # the first hit, so it's cheap even on large trees.
+        local search_roots=(
+            "$SCRIPT_DIR/frontend/src"
+            "$SCRIPT_DIR/frontend/index.html"
+            "$SCRIPT_DIR/frontend/vite.config.ts"
+            "$SCRIPT_DIR/frontend/tsconfig.json"
+            "$SCRIPT_DIR/frontend/tsconfig.app.json"
+            "$SCRIPT_DIR/frontend/package.json"
+            "$SCRIPT_DIR/package.json"
+            "$SCRIPT_DIR/package-lock.json"
+        )
+        # Add every plugin's frontend/ directory that exists.
+        local plugin_root
+        for plugin_root in \
+            "$SCRIPT_DIR/std-plugins" \
+            "$SCRIPT_DIR/local-plugins" \
+            "$SCRIPT_DIR/installed-plugins"
+        do
+            [ -d "$plugin_root" ] || continue
+            local plugin_dir
+            for plugin_dir in "$plugin_root"/*/frontend; do
+                [ -d "$plugin_dir" ] && search_roots+=("$plugin_dir")
+            done
+        done
+        local newer
+        newer=$(find "${search_roots[@]}" \
+            -path '*/node_modules' -prune -o \
+            -path '*/dist' -prune -o \
+            \( -type f -newer "$sentinel" -print -quit \) 2>/dev/null) || true
+        if [ -n "$newer" ]; then
+            need_rebuild=true
+        fi
+    fi
+    if [ "$need_rebuild" = "false" ]; then
+        echo "Frontend build is up to date — skipping."
+        return 0
+    fi
+
+    echo "Building frontend..."
     cd "$SCRIPT_DIR/frontend" && npm run build
     rm -rf "$SCRIPT_DIR/src/gilbert/web/spa"
     cp -r "$SCRIPT_DIR/frontend/dist" "$SCRIPT_DIR/src/gilbert/web/spa"
