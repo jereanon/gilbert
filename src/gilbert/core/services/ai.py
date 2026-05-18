@@ -76,6 +76,7 @@ ai_logger = logging.getLogger("gilbert.ai")
 _COLLECTION = "ai_conversations"
 _PROFILES_COLLECTION = "ai_profiles"
 _ASSIGNMENTS_COLLECTION = "ai_profile_assignments"
+_CHAT_SPEECH_COLLECTION = "chat_speech_prefs"
 _COMPRESSION_STATE_KEY = "compression"
 _COMPRESSION_CONFIG_KEY = "compression_config"
 
@@ -4351,6 +4352,41 @@ class AIService(Service):
         state[key] = value
         data["state"] = state
         await self._storage.put(_COLLECTION, cid, data)
+
+    async def get_speech_pref(self, user_id: str, conversation_id: str) -> bool:
+        """Return True if user has read-aloud enabled for the conversation.
+
+        Defaults to False for unknown (user, conv) pairs.
+        """
+        if not self._storage or not user_id or not conversation_id:
+            return False
+        record = await self._storage.get(
+            _CHAT_SPEECH_COLLECTION, f"{user_id}:{conversation_id}"
+        )
+        if not record:
+            return False
+        return bool(record.get("enabled"))
+
+    async def set_speech_pref(
+        self, user_id: str, conversation_id: str, enabled: bool
+    ) -> None:
+        """Upsert the read-aloud preference for (user, conversation).
+
+        Caller is responsible for verifying conversation access — this
+        method does NOT check membership. RBAC lives in the WS handler.
+        """
+        if not self._storage:
+            return
+        await self._storage.put(
+            _CHAT_SPEECH_COLLECTION,
+            f"{user_id}:{conversation_id}",
+            {
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "enabled": bool(enabled),
+                "updated_at": datetime.now(UTC).isoformat(),
+            },
+        )
 
     async def clear_conversation_state(
         self,
