@@ -209,3 +209,45 @@ async def test_group_speakers_passes_through_same_backend():
 
     await svc.group_speakers(["fake_a:a1", "fake_a:a2"])  # should not raise
     assert captured["ids"] == ["a1", "a2"], f"got {captured['ids']}"
+
+
+# ---------------------------------------------------------------------------
+# Task 12: config_params — per-backend sections + primary_backend
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_config_params_emits_per_backend_sections_and_primary_backend():
+    # Side-effect import to ensure fake backends are registered
+    import gilbert.integrations.local_speaker  # noqa: F401
+    import gilbert.integrations.browser_speaker  # noqa: F401
+
+    svc = SpeakerService()
+    keys = {p.key for p in svc.config_params()}
+    # Per-backend sections must appear for every registered backend
+    backend_names = set(SpeakerBackend.registered_backends())
+    for name in backend_names:
+        assert f"backends.{name}.enabled" in keys, f"missing backends.{name}.enabled"
+    assert "primary_backend" in keys
+    # Legacy single-select must be removed
+    assert "backend" not in keys
+
+
+@pytest.mark.asyncio
+async def test_primary_backend_auto_picks_first_enabled_when_unset(caplog):
+    """When primary_backend is unset, service picks first-alphabetical enabled backend."""
+    svc = SpeakerService()
+    # Simulate post-_reinit_backends state with two loaded backends
+    svc._backends = {"fake_b": FakeSpeakerBackendB(), "fake_a": FakeSpeakerBackendA()}
+    svc._resolve_primary_backend(primary="")
+    assert svc._primary_backend == "fake_a"  # alphabetical first
+    # Verify a WARN log fired
+    assert any("primary_backend" in r.message for r in caplog.records if r.levelname == "WARNING")
+
+
+@pytest.mark.asyncio
+async def test_primary_backend_falls_back_when_pointing_at_unloaded():
+    svc = SpeakerService()
+    svc._backends = {"fake_a": FakeSpeakerBackendA()}
+    svc._resolve_primary_backend(primary="nope")
+    assert svc._primary_backend == "fake_a"

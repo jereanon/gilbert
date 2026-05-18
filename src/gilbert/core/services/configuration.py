@@ -513,6 +513,18 @@ class ConfigurationService(Service):
                     return [s.name for s in svc.cached_speakers]
                 except Exception:
                     logger.debug("speakers dynamic choices failed", exc_info=True)
+        elif source == "speakers.enabled_backends":
+            svc = self._resolver.get_capability("speaker_control")
+            if svc is not None:
+                backends = getattr(svc, "backends", None)
+                if backends is not None:
+                    try:
+                        return sorted(backends.keys())
+                    except Exception:
+                        logger.debug(
+                            "speakers.enabled_backends dynamic choices failed",
+                            exc_info=True,
+                        )
         elif source == "doorbells":
             from gilbert.interfaces.doorbell import AvailableDoorbellLister
 

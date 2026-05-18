@@ -218,7 +218,6 @@ class SpeakerService(Service):
 
         self._enabled = True
         self._apply_config(section)
-        self._primary_backend = section.get("primary_backend", "")
 
         # Side-effect imports so the bundled vendor-free backends
         # register. Third-party backends (Sonos, …) register via plugins.
@@ -244,6 +243,7 @@ class SpeakerService(Service):
 
         # Initialize all configured backends.
         await self._reinit_backends(section.get("backends", {}))
+        self._resolve_primary_backend(primary=section.get("primary_backend", ""))
 
         # Ensure alias index
         from gilbert.interfaces.storage import IndexDefinition
@@ -298,6 +298,34 @@ class SpeakerService(Service):
         spk = section.get("default_announce_speakers")
         if isinstance(spk, list):
             self._default_announce_speakers = spk
+
+    def _resolve_primary_backend(self, *, primary: str) -> None:
+        """Set ``self._primary_backend`` from the configured value.
+
+        Falls back to the alphabetically-first loaded backend when the
+        configured value is empty or points at a backend that isn't loaded.
+        Logs a one-time WARN on fallback.
+        """
+        if primary and primary in self._backends:
+            self._primary_backend = primary
+            return
+        candidates = sorted(self._backends)
+        if not candidates:
+            self._primary_backend = ""
+            return
+        chosen = candidates[0]
+        if primary:
+            logger.warning(
+                "speaker.primary_backend=%r is not loaded; falling back to %r",
+                primary,
+                chosen,
+            )
+        else:
+            logger.warning(
+                "speaker.primary_backend not set; defaulting to %r",
+                chosen,
+            )
+        self._primary_backend = chosen
 
     async def _refresh_cached_speakers(self) -> None:
         """Refresh the cached speaker list from all loaded backends.
@@ -370,20 +398,13 @@ class SpeakerService(Service):
         return "Media"
 
     def config_params(self) -> list[ConfigParam]:
-        # Side-effect import so the bundled local backend shows up in
-        # the ``backend`` choices dropdown even before the service starts.
+        # Side-effect imports so bundled backends register before we
+        # iterate ``SpeakerBackend.registered_backends()``.
+        import gilbert.integrations.browser_speaker  # noqa: F401
         import gilbert.integrations.local_speaker  # noqa: F401
         from gilbert.interfaces.speaker import SpeakerBackend
 
-        params = [
-            ConfigParam(
-                key="backend",
-                type=ToolParameterType.STRING,
-                description="Speaker backend type.",
-                default="sonos",
-                restart_required=True,
-                choices=tuple(SpeakerBackend.registered_backends().keys()),
-            ),
+        params: list[ConfigParam] = [
             ConfigParam(
                 key="default_announce_volume",
                 type=ToolParameterType.INTEGER,
@@ -396,35 +417,51 @@ class SpeakerService(Service):
                 default=[],
                 choices_from="speakers",
             ),
+            ConfigParam(
+                key="primary_backend",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Receives bare announce()/play() calls without explicit "
+                    "speaker targets. Defaults to the first alphabetically-ordered "
+                    "enabled backend when unset."
+                ),
+                default="",
+                choices_from="speakers.enabled_backends",
+            ),
         ]
-        # Use live backend instance if available, otherwise fall back to registry class
-        if self._backends:
-            backend_params = self._require_single_backend().backend_config_params()
-        else:
-            backends = SpeakerBackend.registered_backends()
-            backend_cls = backends.get(self._backend_name)
-            backend_params = backend_cls.backend_config_params() if backend_cls else []
-        for bp in backend_params:
+        # Per-backend sections (mirrors AIService.config_params pattern)
+        for name, cls in sorted(SpeakerBackend.registered_backends().items()):
             params.append(
                 ConfigParam(
-                    key=f"settings.{bp.key}",
-                    type=bp.type,
-                    description=bp.description,
-                    default=bp.default,
-                    restart_required=bp.restart_required,
-                    sensitive=bp.sensitive,
-                    choices=bp.choices,
-                    multiline=bp.multiline,
-                    backend_param=True,
-                    ai_prompt=bp.ai_prompt,
+                    key=f"backends.{name}.enabled",
+                    type=ToolParameterType.BOOLEAN,
+                    description=f"Enable the '{name}' speaker backend.",
+                    default=False,
+                    restart_required=True,
                 )
             )
+            for bp in cls.backend_config_params():
+                params.append(
+                    ConfigParam(
+                        key=f"backends.{name}.{bp.key}",
+                        type=bp.type,
+                        description=f"[{name}] {bp.description}",
+                        default=bp.default,
+                        restart_required=bp.restart_required,
+                        sensitive=bp.sensitive,
+                        choices=bp.choices,
+                        choices_from=bp.choices_from,
+                        multiline=bp.multiline,
+                        backend_param=True,
+                        ai_prompt=bp.ai_prompt,
+                    )
+                )
         return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
         self._apply_config(config)
-        self._primary_backend = config.get("primary_backend", self._primary_backend)
         await self._reinit_backends(config.get("backends", {}))
+        self._resolve_primary_backend(primary=config.get("primary_backend", ""))
 
     # --- ConfigActionProvider ---
 
