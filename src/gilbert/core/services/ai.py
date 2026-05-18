@@ -1188,6 +1188,7 @@ class AIService(Service):
         self._assignments: dict[str, str] = {}  # call_name -> profile_name
         self._default_profile: str = _DEFAULT_PROFILE
         self._chat_profile: str = "standard"
+        self._chat_speech_voice: str = ""
         # Internal helpers (initialized in start())
         self._soul: _SoulHelper | None = None
         self._identity: _IdentityHelper | None = None
@@ -1312,6 +1313,7 @@ class AIService(Service):
         )
         self._default_profile = section.get("default_profile", _DEFAULT_PROFILE)
         self._chat_profile = section.get("chat_profile", self._chat_profile)
+        self._chat_speech_voice = section.get("chat_speech_voice", "")
         # Persona config flows through a separate path (see
         # ``_apply_persona_config``) because the helpers must exist before
         # we can push the values into them. ``start()`` calls both.
@@ -1396,6 +1398,17 @@ class AIService(Service):
                 description="AI profile for web and Slack chat.",
                 default="standard",
                 choices_from="ai_profiles",
+            ),
+            ConfigParam(
+                key="chat_speech_voice",
+                type=ToolParameterType.STRING,
+                description=(
+                    "Voice id (or empty) used when reading chat replies aloud to "
+                    "users who have per-chat read-aloud enabled. Empty means use "
+                    "the TTS service's default voice. Not user-configurable per "
+                    "chat in v1."
+                ),
+                default="",
             ),
             ConfigParam(
                 key="persona.soul",
