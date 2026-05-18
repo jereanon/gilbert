@@ -98,6 +98,8 @@ async def test_get_ws_handlers_exposes_browser_speaker_rpcs(
     assert "browser_speaker.deactivate" in handlers
 
 
+from unittest.mock import AsyncMock, patch
+
 from gilbert.interfaces.context import set_current_user
 
 
@@ -147,3 +149,68 @@ async def test_list_speakers_system_user_sees_all_browser_entries(
 
     browser_ids = {s.speaker_id for s in speakers if s.backend_name == "browser"}
     assert browser_ids == {"browser:alice", "browser:bob"}
+
+
+@pytest.mark.asyncio
+async def test_play_on_speakers_non_admin_rejects_other_user_browser(
+    svc_with_browser_backend: SpeakerService,
+) -> None:
+    svc = svc_with_browser_backend
+    backend = svc._backends["browser"]
+    backend.activate(conn_id="c1", user_id="bob", display_name="Bob")
+
+    set_current_user(_make_user("alice"))
+    with pytest.raises(PermissionError, match="another user"):
+        await svc.play_on_speakers(
+            uri="http://example.com/x.mp3",
+            speaker_ids=["browser:bob"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_play_on_speakers_admin_accepts_other_user_browser(
+    svc_with_browser_backend: SpeakerService,
+) -> None:
+    svc = svc_with_browser_backend
+    backend = svc._backends["browser"]
+    backend.activate(conn_id="c1", user_id="bob", display_name="Bob")
+    backend.play_uri = AsyncMock()  # skip the event-bus dependency
+
+    set_current_user(_make_admin())
+    # Should not raise PermissionError.
+    await svc.play_on_speakers(
+        uri="http://example.com/x.mp3",
+        speaker_ids=["browser:bob"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_play_on_speakers_non_admin_accepts_own_browser(
+    svc_with_browser_backend: SpeakerService,
+) -> None:
+    svc = svc_with_browser_backend
+    backend = svc._backends["browser"]
+    backend.activate(conn_id="c1", user_id="alice", display_name="Alice")
+    backend.play_uri = AsyncMock()  # skip the event-bus dependency
+
+    set_current_user(_make_user("alice"))
+    await svc.play_on_speakers(
+        uri="http://example.com/x.mp3",
+        speaker_ids=["browser:alice"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_play_on_speakers_system_user_bypasses_check(
+    svc_with_browser_backend: SpeakerService,
+) -> None:
+    svc = svc_with_browser_backend
+    backend = svc._backends["browser"]
+    backend.activate(conn_id="c1", user_id="bob", display_name="Bob")
+    backend.play_uri = AsyncMock()  # skip the event-bus dependency
+
+    set_current_user(UserContext.SYSTEM)
+    await svc.play_on_speakers(
+        uri="http://example.com/x.mp3",
+        speaker_ids=["browser:bob"],
+    )

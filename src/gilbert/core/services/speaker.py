@@ -316,6 +316,26 @@ class SpeakerService(Service):
             return self._access_control.get_effective_level(user_ctx) <= 0
         return "admin" in user_ctx.roles
 
+    def _check_browser_target_permissions(self, target_ids: list[str]) -> None:
+        """Reject cross-user browser targets unless the caller is admin.
+
+        No-op if no ``browser:*`` IDs are in the target list. Admins
+        (and the SYSTEM user) bypass the check entirely.
+        """
+        from gilbert.interfaces.context import get_current_user
+
+        user = get_current_user()
+        if self._is_admin(user):
+            return
+        for sid in target_ids:
+            if sid.startswith("browser:"):
+                _, target_user = split_speaker_id(sid)
+                if target_user != user.user_id:
+                    raise PermissionError(
+                        f"You can only target your own browser; "
+                        f"{sid!r} belongs to another user."
+                    )
+
     def _apply_config(self, section: dict[str, Any]) -> None:
         """Apply tunable config values."""
         self._config = section.get("settings", self._config)
@@ -845,6 +865,7 @@ class SpeakerService(Service):
         """
         if not speaker_ids:
             return
+        self._check_browser_target_permissions(speaker_ids)
         grouped = self._route_ids(speaker_ids)
         coros: list[Any] = []
         for backend_name, native_ids in grouped.items():
@@ -902,6 +923,7 @@ class SpeakerService(Service):
         self,
         uri: str,
         speaker_names: list[str] | None = None,
+        speaker_ids: list[str] | None = None,
         volume: int | None = None,
         title: str = "",
         position_seconds: float | None = None,
@@ -917,8 +939,16 @@ class SpeakerService(Service):
         a short-overlay path (e.g. Sonos ``audio_clip``) that ducks the
         current music, plays the clip, and auto-restores — no
         snapshot/restore ritual required.
+
+        ``speaker_ids`` accepts pre-resolved namespaced IDs (e.g.
+        ``browser:alice``) and bypasses name resolution. Provide either
+        ``speaker_names`` or ``speaker_ids``, not both.
         """
-        target_ids = await self._resolve_target_ids(speaker_names)
+        if speaker_ids is not None:
+            target_ids = speaker_ids
+        else:
+            target_ids = await self._resolve_target_ids(speaker_names)
+        self._check_browser_target_permissions(target_ids)
 
         # Skip topology changes for announce clips — audio_clip is a
         # per-player overlay that doesn't need grouping, and reshuffling
@@ -977,6 +1007,7 @@ class SpeakerService(Service):
         flag before invoking this.
         """
         target_ids = await self._resolve_target_ids(speaker_names)
+        self._check_browser_target_permissions(target_ids)
         await self.prepare_speakers(target_ids)
         grouped = self._route_ids(target_ids)
         coros = []
@@ -1013,6 +1044,7 @@ class SpeakerService(Service):
         """
         self._require_single_backend()  # raise if no backend configured
         target_ids = await self._resolve_target_ids(speaker_names)
+        self._check_browser_target_permissions(target_ids)
         await self.prepare_speakers(target_ids)
 
         # Check playback state on the coordinator (first target). All
@@ -1051,6 +1083,7 @@ class SpeakerService(Service):
         """
         self._require_single_backend()  # raise if no backend configured
         target_ids = await self._resolve_target_ids(speaker_names)
+        self._check_browser_target_permissions(target_ids)
         grouped = self._route_ids(target_ids)
         coros = []
         for backend_name, native_ids in grouped.items():
@@ -1064,6 +1097,7 @@ class SpeakerService(Service):
     ) -> None:
         """Stop playback on the specified speakers."""
         target_ids = await self._resolve_target_ids(speaker_names)
+        self._check_browser_target_permissions(target_ids)
         grouped = self._route_ids(target_ids)
         coros = []
         for backend_name, native_ids in grouped.items():
@@ -1094,10 +1128,12 @@ class SpeakerService(Service):
             sid = await self.resolve_speaker_name(speaker_name)
             if sid is None:
                 raise KeyError(f"Unknown speaker or alias: {speaker_name!r}")
+            self._check_browser_target_permissions([sid])
             routed_backend, native = self._route_id(sid)
             return await routed_backend.get_now_playing(native)
 
         if self._last_speaker_ids:
+            self._check_browser_target_permissions([self._last_speaker_ids[0]])
             routed_backend, native = self._route_id(self._last_speaker_ids[0])
             return await routed_backend.get_now_playing(native)
 
@@ -1106,8 +1142,10 @@ class SpeakerService(Service):
             return NowPlaying(state=PlaybackState.STOPPED)
         for s in speakers:
             if s.state == PlaybackState.PLAYING:
+                self._check_browser_target_permissions([s.speaker_id])
                 routed_backend, native = self._route_id(s.speaker_id)
                 return await routed_backend.get_now_playing(native)
+        self._check_browser_target_permissions([speakers[0].speaker_id])
         routed_backend, native = self._route_id(speakers[0].speaker_id)
         return await routed_backend.get_now_playing(native)
 
@@ -1141,6 +1179,7 @@ class SpeakerService(Service):
         # means no speakers to announce on — let _announce_inner handle
         # the degenerate case without acquiring any locks.
         target_ids = await self._resolve_target_ids(speaker_names)
+        self._check_browser_target_permissions(target_ids)
         if not target_ids:
             return await self._announce_inner(
                 text, speaker_names, volume, target_ids=target_ids, context=context
@@ -1716,17 +1755,25 @@ class SpeakerService(Service):
         volume: int | None = arguments.get("volume")
         position: float | None = arguments.get("position_seconds")
 
-        await self.play_on_speakers(
-            uri=uri,
-            speaker_names=speaker_names or None,
-            volume=volume,
-            position_seconds=position,
-        )
+        try:
+            await self.play_on_speakers(
+                uri=uri,
+                speaker_names=speaker_names or None,
+                volume=volume,
+                position_seconds=position,
+            )
+        except PermissionError as exc:
+            return json.dumps({"status": "error", "error": str(exc)})
+        except ValueError as exc:
+            return json.dumps({"status": "error", "error": str(exc)})
         return json.dumps({"status": "playing", "uri": uri})
 
     async def _tool_stop_audio(self, arguments: dict[str, Any]) -> str:
         speaker_names: list[str] = arguments.get("speakers", [])
-        await self.stop_speakers(speaker_names or None)
+        try:
+            await self.stop_speakers(speaker_names or None)
+        except PermissionError as exc:
+            return json.dumps({"status": "error", "error": str(exc)})
         return json.dumps({"status": "stopped"})
 
     async def _tool_set_volume(self, arguments: dict[str, Any]) -> str:
@@ -1735,6 +1782,10 @@ class SpeakerService(Service):
         sid = await self.resolve_speaker_name(name)
         if sid is None:
             return json.dumps({"error": f"Speaker not found: {name}"})
+        try:
+            self._check_browser_target_permissions([sid])
+        except PermissionError as exc:
+            return json.dumps({"status": "error", "error": str(exc)})
         backend, native = self._route_id(sid)
         await backend.set_volume(native, volume)
         return json.dumps({"status": "ok", "speaker": name, "volume": volume})
@@ -1744,6 +1795,10 @@ class SpeakerService(Service):
         sid = await self.resolve_speaker_name(name)
         if sid is None:
             return json.dumps({"error": f"Speaker not found: {name}"})
+        try:
+            self._check_browser_target_permissions([sid])
+        except PermissionError as exc:
+            return json.dumps({"status": "error", "error": str(exc)})
         backend, native = self._route_id(sid)
         volume = await backend.get_volume(native)
         return json.dumps({"speaker": name, "volume": volume})
@@ -1781,6 +1836,8 @@ class SpeakerService(Service):
                 volume=volume,
                 context=context,
             )
+        except PermissionError as e:
+            return json.dumps({"status": "error", "error": str(e)})
         except RuntimeError as e:
             return json.dumps({"error": str(e)})
 
