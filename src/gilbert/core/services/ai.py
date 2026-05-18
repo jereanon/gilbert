@@ -5482,6 +5482,61 @@ class AIService(Service):
             and b.get("exclude_user") != user_id
         ]
 
+    async def _speak_response(
+        self,
+        user: UserContext,
+        conversation_id: str,
+        response_text: str,
+    ) -> None:
+        """Fire-and-forget: synth the chat reply via TTS and play it in
+        the user's active browser tab.
+
+        Safe to call from a chat-turn handler; any failure is logged and
+        swallowed so a TTS hiccup never breaks the chat reply itself.
+        """
+        import uuid
+        from gilbert.core.chat import strip_markdown_for_speech
+        from gilbert.core.output import cleanup_old_files, get_output_dir
+        from gilbert.interfaces.tts import SynthesisRequest
+
+        try:
+            plain = strip_markdown_for_speech(response_text).strip()
+            if not plain:
+                return
+            if self._resolver is None:
+                return
+            tts_svc = self._resolver.get_capability("text_to_speech")
+            speaker_svc = self._resolver.get_capability("speaker_control")
+            if tts_svc is None or speaker_svc is None:
+                return
+            speakers = await speaker_svc.list_speakers()
+            target_id = f"browser:{user.user_id}"
+            if not any(s.speaker_id == target_id for s in speakers):
+                return
+            voice_id = getattr(self, "_chat_speech_voice", "") or ""
+            result = await tts_svc.synthesize(
+                SynthesisRequest(text=plain, voice_id=voice_id)
+            )
+            output_dir = get_output_dir("speaker")
+            cleanup_old_files(output_dir, 3600)
+            file_path = output_dir / f"chat-speech-{uuid.uuid4()}.mp3"
+            file_path.write_bytes(result.audio)
+            audio_url = speaker_svc._audio_url(str(file_path.resolve()))
+            await speaker_svc.play_on_speakers(
+                uri=audio_url,
+                speaker_ids=[target_id],
+                title="Gilbert",
+                announce=False,
+                kind="chat_speech",
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "chat read-aloud: speak_response failed for user=%s conv=%s",
+                user.user_id,
+                conversation_id,
+                exc_info=True,
+            )
+
     def get_ws_handlers(self) -> dict[str, Any]:
         return {
             "chat.message.send": self._ws_chat_send,
