@@ -11,6 +11,7 @@ import asyncio
 import fnmatch
 import logging
 import time
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -76,6 +77,7 @@ class WsConnection:
         self.user_ctx = user_ctx
         self.user_level = user_level
         self.manager = manager
+        self.connection_id: str = uuid.uuid4().hex
         self.subscriptions: set[str] = {"*"}  # auto-subscribe to all
         self.shared_conv_ids: set[str] = set()
         self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=200)
@@ -87,6 +89,10 @@ class WsConnection:
     @property
     def user_id(self) -> str:
         return self.user_ctx.user_id
+
+    @property
+    def display_name(self) -> str:
+        return self.user_ctx.display_name or self.user_id
 
     @property
     def roles(self) -> frozenset[str]:
@@ -136,6 +142,19 @@ class WsConnection:
         notification events for their own user.
         """
         if not event.event_type.startswith("notification."):
+            return True
+        return event.data.get("user_id") == self.user_id
+
+    def can_see_speaker_browser_event(self, event: Event) -> bool:
+        """Content-level filter for browser-speaker playback frames.
+
+        ``speaker.browser.*`` events are addressed to a specific user
+        (their browser tab is the playback device) via the ``user_id``
+        field on ``event.data``. Other users' connections never see
+        them — playback in a private chat must stay private even when
+        admins are subscribed broadly.
+        """
+        if not event.event_type.startswith("speaker.browser."):
             return True
         return event.data.get("user_id") == self.user_id
 
@@ -373,6 +392,8 @@ class WsConnectionManager:
                 continue
             if not conn.can_see_notification_event(event):
                 continue
+            if not conn.can_see_speaker_browser_event(event):
+                continue
             conn.send_event(event)
 
 
@@ -494,9 +515,9 @@ async def dispatch_frame(conn: WsConnection, frame: dict[str, Any]) -> dict[str,
             }
 
     # Propagate the current user through the async context so services
-    # can read it via gilbert.core.context.get_current_user() without
+    # can read it via gilbert.interfaces.context.get_current_user() without
     # explicit threading on every read method.
-    from gilbert.core.context import set_current_user
+    from gilbert.interfaces.context import set_current_user
 
     set_current_user(conn.user_ctx)
     return await handler(conn, frame)
