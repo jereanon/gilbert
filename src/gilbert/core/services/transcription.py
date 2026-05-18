@@ -27,11 +27,13 @@ from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.tools import ToolParameterType
 from gilbert.interfaces.transcription import (
     BatchTranscriptionBackend,
+    StreamConfig,
     StreamingTranscriptionBackend,
     TranscriptionRequest,
     TranscriptionResult,
     TranscriptionStream,
     WakeWordBackend,
+    WakeWordConfig,
     WakeWordDetector,
 )
 
@@ -294,6 +296,59 @@ class TranscriptionService(Service):
                     f"loaded={sorted(self._batch_backends)})"
                 )
         return await self._batch_backends[name].transcribe(request)
+
+    # --- Public API: StreamingTranscriber + WakeWordListener -----
+
+    async def open_stream(
+        self,
+        config: StreamConfig,
+        backend: str | None = None,
+    ) -> TranscriptionStream:
+        """Open a streaming transcription session."""
+        name = backend or self._default_streaming
+        if not name or name not in self._streaming_backends:
+            # If no default but only one is loaded, use it.
+            if len(self._streaming_backends) == 1:
+                name = next(iter(self._streaming_backends))
+            else:
+                raise RuntimeError(
+                    f"no transcription backend available for streaming "
+                    f"(asked for {backend!r}, default={self._default_streaming!r})"
+                )
+        return await self._streaming_backends[name].open_stream(config)
+
+    async def open_detector(
+        self,
+        config: WakeWordConfig,
+        backend: str | None = None,
+    ) -> WakeWordDetector:
+        """Open a wake-word detection session."""
+        name = backend or self._default_wake_word
+        if not name or name not in self._wake_word_backends:
+            # If no default but only one is loaded, use it.
+            if len(self._wake_word_backends) == 1:
+                name = next(iter(self._wake_word_backends))
+            else:
+                raise RuntimeError(
+                    f"no transcription backend available for wake_word "
+                    f"(asked for {backend!r}, default={self._default_wake_word!r})"
+                )
+        return await self._wake_word_backends[name].open_detector(config)
+
+    def list_backends(self, role: str | None = None) -> dict[str, list[str]]:
+        """Return loaded backend names per role.
+
+        With ``role=None`` returns all three roles. With ``role`` set,
+        returns only that role's entry.
+        """
+        all_roles = {
+            "batch": sorted(self._batch_backends),
+            "streaming": sorted(self._streaming_backends),
+            "wake_word": sorted(self._wake_word_backends),
+        }
+        if role is None:
+            return all_roles
+        return {role: all_roles[role]}
 
     # --- Lifecycle ------------------------------------------------
 

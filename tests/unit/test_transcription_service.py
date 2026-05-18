@@ -11,6 +11,8 @@ from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.service import ServiceInfo
 from gilbert.interfaces.tools import ToolParameterType
 from gilbert.interfaces.transcription import (
+    AudioEncoding,
+    AudioFormat,
     BatchTranscriptionBackend,
     FinalTranscript,
     StreamConfig,
@@ -306,3 +308,49 @@ async def test_transcribe_raises_when_no_backend_available():
     svc = TranscriptionService()  # nothing loaded, no default
     with pytest.raises(RuntimeError, match="no transcription backend available"):
         await svc.transcribe(TranscriptionRequest(audio=b""))
+
+
+# --- Streaming and wake-word routing tests (Task 7) ---
+
+
+@pytest.mark.asyncio
+async def test_open_stream_returns_backend_primitive():
+    svc = TranscriptionService()
+    svc._apply_config_section({
+        "streaming": {
+            "default": "_fake_streaming",
+            "backends": {"_fake_streaming": {"enabled": True}},
+        },
+    })
+    await svc._reinit_backends_for_role("streaming")
+    cfg = StreamConfig(format=AudioFormat(AudioEncoding.PCM_S16LE))
+    stream = await svc.open_stream(cfg)
+    assert isinstance(stream, TranscriptionStream)
+    await stream.send(b"\x00\x00")
+    await stream.close()
+
+
+@pytest.mark.asyncio
+async def test_open_detector_returns_backend_primitive():
+    svc = TranscriptionService()
+    svc._apply_config_section({
+        "wake_word": {
+            "default": "_fake_wake",
+            "backends": {"_fake_wake": {"enabled": True}},
+        },
+    })
+    await svc._reinit_backends_for_role("wake_word")
+    det = await svc.open_detector(WakeWordConfig(
+        keywords=["hey"], format=AudioFormat(AudioEncoding.PCM_S16LE)
+    ))
+    assert isinstance(det, WakeWordDetector)
+    await det.close()
+
+
+def test_list_backends_returns_loaded_per_role():
+    svc = TranscriptionService()
+    svc._batch_backends["a"] = _FakeBatch()
+    svc._streaming_backends["b"] = _FakeStreaming()
+    out = svc.list_backends()
+    assert out == {"batch": ["a"], "streaming": ["b"], "wake_word": []}
+    assert svc.list_backends("batch") == {"batch": ["a"]}
