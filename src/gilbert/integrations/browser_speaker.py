@@ -77,6 +77,10 @@ class BrowserSpeakerBackend(SpeakerBackend):
         self._display_name = "My Browser"
         self._default_volume = _DEFAULT_VOLUME
         self._bus: EventBus | None = None
+        self._active_connections: dict[str, dict[str, str]] = {}
+        # user_id -> {conn_id: display_name_when_registered}
+        self._conn_to_user: dict[str, str] = {}
+        # conn_id -> user_id (reverse lookup for disconnect)
 
     # ── Capability injection ────────────────────────────────────────
 
@@ -89,6 +93,28 @@ class BrowserSpeakerBackend(SpeakerBackend):
         """
         if isinstance(provider, EventBusProvider):
             self._bus = provider.bus
+
+    # ── Activation tracking ─────────────────────────────────────────
+
+    def activate(self, *, conn_id: str, user_id: str, display_name: str) -> None:
+        """Register a connection as an active browser-speaker for a user.
+
+        Idempotent. Calling with the same ``conn_id`` twice is a no-op.
+        """
+        self._active_connections.setdefault(user_id, {})[conn_id] = display_name
+        self._conn_to_user[conn_id] = user_id
+
+    def deactivate(self, *, conn_id: str) -> None:
+        """Unregister a connection. No-op if conn_id is unknown."""
+        user_id = self._conn_to_user.pop(conn_id, None)
+        if user_id is None:
+            return
+        conns = self._active_connections.get(user_id)
+        if conns is None:
+            return
+        conns.pop(conn_id, None)
+        if not conns:
+            self._active_connections.pop(user_id, None)
 
     # ── Lifecycle ───────────────────────────────────────────────────
 
@@ -118,14 +144,21 @@ class BrowserSpeakerBackend(SpeakerBackend):
     # ── Discovery ──────────────────────────────────────────────────
 
     async def list_speakers(self) -> list[SpeakerInfo]:
-        """Return exactly one speaker — the calling user's browser.
+        """Return one ``SpeakerInfo`` per user with at least one active connection.
 
-        The contextvar identifies who's asking, so different users
-        each see their own browser entry. System / unauthenticated
-        contexts return an empty list (nothing to address).
+        Role-based filtering happens upstream in ``SpeakerService.list_speakers``.
         """
-        speaker = self._speaker_for_current_user()
-        return [speaker] if speaker is not None else []
+        out: list[SpeakerInfo] = []
+        for user_id, conns in self._active_connections.items():
+            if not conns:
+                continue
+            display_name = next(iter(conns.values()))
+            out.append(SpeakerInfo(
+                speaker_id=user_id,
+                name=f"{display_name}'s Browser",
+                ip_address="",
+            ))
+        return out
 
     async def get_speaker(self, speaker_id: str) -> SpeakerInfo | None:
         speaker = self._speaker_for_current_user()
