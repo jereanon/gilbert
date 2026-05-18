@@ -330,3 +330,75 @@ def test_supports_loop_wildcard_compat_any_repeat_capable_backend_qualifies():
     music_svc._speaker_svc = fake_speaker_svc
 
     assert music_svc.supports_loop is True
+
+
+# --- Regression: magic alias must flow through compatibility validation ---
+
+
+@pytest.mark.asyncio
+async def test_music_service_rejects_my_browser_alias_when_music_is_sonos_only():
+    """The 'my browser' alias must resolve through compatibility validation,
+    not silently pass through. Otherwise a Sonos-only music backend would
+    dispatch Spotify URIs to a browser tab that can't play them.
+
+    This exercises the real SpeakerService.resolve_names (not a mock) to
+    confirm the alias path is handled — the regression being tested is that
+    resolve_names used to return {} for magic aliases, causing validation to
+    pass vacuously.
+    """
+    from typing import Any
+    from unittest.mock import AsyncMock
+
+    from gilbert.core.services.music import MusicService
+    from gilbert.core.services.speaker import SpeakerService
+    from gilbert.core.services.storage import StorageService
+    from gilbert.integrations.browser_speaker import BrowserSpeakerBackend
+    from gilbert.interfaces.auth import UserContext
+    from gilbert.interfaces.context import set_current_user
+    from gilbert.interfaces.music import MusicItem
+    from gilbert.interfaces.service import ServiceResolver
+    from gilbert.interfaces.storage import StorageBackend
+
+    class _MinimalStorage(StorageBackend):
+        async def initialize(self) -> None: pass
+        async def close(self) -> None: pass
+        async def put(self, c, i, d): pass
+        async def get(self, c, i): return None
+        async def delete(self, c, i): pass
+        async def exists(self, c, i): return False
+        async def query(self, q): return []
+        async def count(self, q): return 0
+        async def list_collections(self): return []
+        async def drop_collection(self, c): pass
+        async def ensure_index(self, i): pass
+        async def list_indexes(self, c): return []
+        async def ensure_foreign_key(self, fk): pass
+        async def list_foreign_keys(self, c): return []
+
+    storage_svc = StorageService(_MinimalStorage())
+
+    resolver = MagicMock(spec=ServiceResolver)
+    resolver.get_capability.side_effect = lambda cap: storage_svc if cap == "entity_storage" else None
+    resolver.require_capability.side_effect = lambda cap: (
+        storage_svc if cap == "entity_storage" else (_ for _ in ()).throw(LookupError(cap))
+    )
+
+    # Build a real SpeakerService with only a browser backend loaded
+    speaker_svc = SpeakerService()
+    browser_backend = BrowserSpeakerBackend()
+    await browser_backend.initialize({})
+    speaker_svc._backends = {"browser": browser_backend}
+    speaker_svc._enabled = True
+    await speaker_svc.start(resolver)
+
+    # Wire MusicService with sonos-only backend and the real speaker service
+    music_svc = MusicService()
+    music_svc._backend = _SonosOnlyMusic()
+    music_svc._enabled = True
+    music_svc._speaker_svc = speaker_svc
+
+    set_current_user(UserContext(user_id="alice", display_name="Alice", email="", roles=frozenset({"user"})))
+
+    item = MusicItem(id="track-1", title="Test Track", kind=MusicItemKind.TRACK, uri="x-sonos:track")
+    with pytest.raises(MusicSearchUnavailableError, match="can't play"):
+        await music_svc.play_item(item, speaker_names=["my browser"])

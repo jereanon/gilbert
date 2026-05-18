@@ -141,3 +141,45 @@ async def test_my_browser_does_not_consult_backend(
     set_current_user(_user("alice"))
     await svc.resolve_speaker_name("my browser")
     assert called == [], "resolve_speaker_name('my browser') must not hit the backend"
+
+
+@pytest.mark.parametrize("alias", ["my browser", "my speaker", "for me", "me"])
+@pytest.mark.asyncio
+async def test_resolve_names_handles_magic_aliases(
+    svc: SpeakerService, alias: str
+) -> None:
+    """``resolve_names`` (plural) must recognize the same magic aliases
+    as ``resolve_speaker_name`` (singular). Used by MusicService's
+    compatibility validation — without this, plays to 'my browser' that
+    should hit cross-vendor errors silently pass through.
+    """
+    set_current_user(_user("alice"))
+    result = await svc.resolve_names([alias])
+    assert result == {alias: "browser:alice"}
+
+
+def _admin(uid: str = "alice") -> UserContext:
+    return UserContext(user_id=uid, display_name=uid.title(), email="", roles=frozenset({"admin"}))
+
+
+@pytest.mark.asyncio
+async def test_resolve_names_mixes_alias_with_real_name(
+    svc: SpeakerService,
+) -> None:
+    """A mixed list (alias + real name) resolves each correctly.
+
+    Uses an admin caller so that list_speakers returns all browser entries
+    (non-admin callers only see their own browser entry).  The test's purpose
+    is to verify that resolve_names delegates to resolve_speaker_name for each
+    item, not to exercise permission filtering.
+    """
+    backend = svc._backends["browser"]
+    backend.activate(conn_id="c1", user_id="alice", display_name="Alice")
+    backend.activate(conn_id="c2", user_id="bob", display_name="Bob")
+    set_current_user(_admin("alice"))
+
+    result = await svc.resolve_names(["my browser", "Bob's Browser"])
+    assert result == {
+        "my browser": "browser:alice",
+        "Bob's Browser": "browser:bob",
+    }

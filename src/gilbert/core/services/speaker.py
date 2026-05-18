@@ -109,19 +109,18 @@ class SpeakerService(Service):
         """Map speaker display names to namespaced speaker ids.
 
         Returns ``{name: "<backend>:<native>"}`` for each name that
-        matches a known speaker. Names that don't match any speaker are
-        omitted (callers decide whether that's an error).
+        matches a known speaker or magic alias. Names that don't match
+        are omitted (callers decide whether that's an error).
 
-        Delegates to ``list_speakers()`` which already returns namespaced
-        ids, so no inline prefix stamping is needed here.
+        Delegates to ``resolve_speaker_name`` for each entry so that
+        magic aliases (``"my browser"``, ``"for me"``, etc.) and
+        persisted aliases in storage resolve uniformly.
         """
         out: dict[str, str] = {}
-        speakers = await self.list_speakers()  # already namespaced
-        by_name = {s.name: s for s in speakers}
         for name in names:
-            s = by_name.get(name)
-            if s is not None:
-                out[name] = s.speaker_id
+            sid = await self.resolve_speaker_name(name)
+            if sid is not None:
+                out[name] = sid
         return out
 
     @property
