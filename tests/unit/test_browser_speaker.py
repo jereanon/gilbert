@@ -125,15 +125,27 @@ async def test_list_speakers_empty_for_system_user(
 
 
 @pytest.mark.asyncio
-async def test_get_speaker_only_matches_current_users_id(
+async def test_get_speaker_returns_info_for_active_registration(
     backend: BrowserSpeakerBackend,
 ) -> None:
     await backend.initialize({})
-    set_current_user(_alice())
-    assert (await backend.get_speaker("browser:user-alice")) is not None
-    # Alice can't fetch Bob's speaker info even by id — every user sees
-    # only their own browser.
+    backend.activate(conn_id="c1", user_id="user-alice", display_name="Alice")
+    info = await backend.get_speaker("browser:user-alice")
+    assert info is not None
+    assert info.speaker_id == "user-alice"
+    # Non-activated user returns None.
     assert (await backend.get_speaker("browser:user-bob")) is None
+
+
+@pytest.mark.asyncio
+async def test_get_speaker_returns_none_after_deactivation(
+    backend: BrowserSpeakerBackend,
+) -> None:
+    await backend.initialize({})
+    backend.activate(conn_id="c1", user_id="user-alice", display_name="Alice")
+    assert await backend.get_speaker("browser:user-alice") is not None
+    backend.deactivate(conn_id="c1")
+    assert await backend.get_speaker("browser:user-alice") is None
 
 
 @pytest.mark.asyncio

@@ -197,7 +197,7 @@ class UserPrefReader(Protocol):
     breaking every caller.
 
     Keys are flat strings — namespace by prefix if needed (e.g.
-    ``"speaker.browser_echo"``). Values are JSON-serializable
+    ``"ui.theme"``). Values are JSON-serializable
     primitives; a service that wants structured prefs should put
     them under a single key as a dict.
     """

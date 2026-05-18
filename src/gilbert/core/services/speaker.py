@@ -42,12 +42,6 @@ logger = logging.getLogger(__name__)
 # Entity collection for speaker aliases
 _ALIAS_COLLECTION = "speaker_aliases"
 
-# Per-user preference key controlling whether speaker output also fans
-# out to the user's connected browser tab. Stored on the user's
-# ``metadata`` dict via ``UserPrefReader``. Namespaced so future per-
-# user speaker prefs sit alongside without collision.
-_BROWSER_ECHO_PREF_KEY = "speaker.browser_echo"
-
 # Magic aliases that resolve to the caller's own browser
 _MY_BROWSER_ALIASES = frozenset({"my browser", "my speaker", "for me", "me"})
 
@@ -82,11 +76,8 @@ class SpeakerService(Service):
         # Backend startup failures keyed by backend name. Populated by
         # ``_reinit_backends`` when a backend raises during initialization.
         self._startup_failures: dict[str, str] = {}
-        # Wired in start() for the per-user browser-echo fan-out. Both
-        # are optional — if either is missing (no user service, no
-        # event bus) the fan-out silently no-ops. The primary backend
-        # still gets the play_uri call.
-        self._users_svc: Any = None
+        # Wired in start() for the per-user browser-echo fan-out.
+        # Optional — if missing the fan-out silently no-ops.
         self._event_bus_provider: Any = None
         # Optional access-control provider for role-aware filtering.
         self._access_control: AccessControlProvider | None = None
@@ -97,7 +88,7 @@ class SpeakerService(Service):
             capabilities=frozenset({"speaker_control", "ai_tools", "ws_handlers"}),
             requires=frozenset({"entity_storage"}),
             optional=frozenset(
-                {"configuration", "text_to_speech", "users", "event_bus", "access_control"}
+                {"configuration", "text_to_speech", "event_bus", "access_control"}
             ),
             toggleable=True,
             toggle_description="Speaker playback and control",
@@ -244,15 +235,6 @@ class SpeakerService(Service):
         bus_svc = resolver.get_capability("event_bus")
         if isinstance(bus_svc, EventBusProvider):
             self._event_bus_provider = bus_svc
-
-        # User-prefs lookup for the browser-echo fan-out. Optional —
-        # without it the fan-out helper bails early and only the
-        # primary backend hears the play.
-        from gilbert.interfaces.users import UserPrefReader
-
-        users_svc = resolver.get_capability("users")
-        if isinstance(users_svc, UserPrefReader):
-            self._users_svc = users_svc
 
         acl_svc = resolver.get_capability("access_control")
         if isinstance(acl_svc, AccessControlProvider):
@@ -749,10 +731,10 @@ class SpeakerService(Service):
         """Mirror a primary play_uri to the caller's browser tab.
 
         Fires after the primary backend's ``play_uri`` when:
-        - the caller has the ``speaker.browser_echo`` pref enabled,
+        - the caller has an active browser registration,
         - the primary backend isn't ``browser`` (would double-play),
         - the caller's own browser is NOT already in the explicit target set (would double-play),
-        - the event bus and users capability are both wired.
+        - the event bus is wired.
 
         Any error here is logged + swallowed: the primary play already
         succeeded and a glitchy secondary path shouldn't surface as
@@ -820,29 +802,28 @@ class SpeakerService(Service):
             logger.debug("Browser-echo stop fan-out failed", exc_info=True)
 
     async def _browser_echo_should_fire(self) -> bool:
-        """All preconditions for browser-echo fan-out in one place."""
-        if self._event_bus_provider is None or self._users_svc is None:
+        """Gate for fan-out to the caller's browser.
+
+        Fires when ALL of:
+        - the event bus is wired
+        - the primary backend isn't ``browser`` (would double-play)
+        - the caller is a real user with an active browser registration
+        """
+        if self._event_bus_provider is None:
             return False
         # Avoid double-play when the primary backend IS the browser —
         # the backend's own publish covers the user already.
-        if self._backend_name == "browser":
+        if self._primary_backend == "browser":
             return False
         from gilbert.interfaces.context import get_current_user
 
         user = get_current_user()
-        if not user.user_id or user.user_id == "system":
+        if not user or not user.user_id or user.user_id == "system":
             return False
-        try:
-            value = await self._users_svc.get_user_pref(
-                user.user_id, _BROWSER_ECHO_PREF_KEY, False
-            )
-        except Exception:
-            logger.debug(
-                "Browser-echo pref lookup failed for %s", user.user_id,
-                exc_info=True,
-            )
+        browser = self._backends.get("browser")
+        if browser is None:
             return False
-        return bool(value)
+        return bool(browser._active_connections.get(user.user_id))
 
     async def _resolve_target_ids(
         self,

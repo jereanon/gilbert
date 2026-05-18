@@ -161,22 +161,25 @@ class BrowserSpeakerBackend(SpeakerBackend):
         return out
 
     async def get_speaker(self, speaker_id: str) -> SpeakerInfo | None:
-        speaker = self._speaker_for_current_user()
-        if speaker is None or speaker.speaker_id != speaker_id:
-            return None
-        return speaker
+        """Return the SpeakerInfo for ``speaker_id`` if the user has an active
+        registration, or ``None`` otherwise.
 
-    def _speaker_for_current_user(self) -> SpeakerInfo | None:
-        user = get_current_user()
-        if not user.user_id or user.user_id == "system":
+        ``speaker_id`` must have the form ``browser:<user_id>`` (as minted by
+        ``list_speakers`` and ``SpeakerService.list_speakers``). The caller's
+        per-user filtering in ``SpeakerService.list_speakers`` ensures
+        non-admin users only see ``browser:<own_user_id>``.
+        """
+        if not speaker_id.startswith(_SPEAKER_ID_PREFIX):
             return None
+        user_id = speaker_id[len(_SPEAKER_ID_PREFIX):]
+        conns = self._active_connections.get(user_id)
+        if not conns:
+            return None
+        display_name = next(iter(conns.values()))
         return SpeakerInfo(
-            speaker_id=f"{_SPEAKER_ID_PREFIX}{user.user_id}",
-            name=self._display_name,
+            speaker_id=user_id,
+            name=f"{display_name}'s Browser",
             ip_address="",
-            model="browser",
-            volume=self._default_volume,
-            state=PlaybackState.STOPPED,
         )
 
     # ── Playback ───────────────────────────────────────────────────
