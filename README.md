@@ -141,7 +141,7 @@ AIBackend            →  anthropic plugin → AnthropicAI (Claude)
                         bedrock plugin   → BedrockAI (AWS Bedrock Converse API)
 VisionBackend        →  anthropic plugin → AnthropicVision
 TTSBackend           →  elevenlabs plugin → ElevenLabsTTS
-SpeakerBackend       →  sonos plugin → SonosSpeaker
+SpeakerBackend       →  core (LocalSpeaker, BrowserSpeaker) + sonos plugin → SonosSpeaker
 MusicBackend         →  sonos plugin → SonosMusic (Spotify via Sonos)
 PresenceBackend      →  unifi plugin → UniFiPresenceBackend (Network + Protect + Access)
 DoorbellBackend      →  unifi plugin → UniFiDoorbellBackend

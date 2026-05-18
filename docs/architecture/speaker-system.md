@@ -58,12 +58,28 @@ Speaker control with an abstract interface and three bundled backends: `sonos` (
 - `src/gilbert/core/services/speaker.py` — `SpeakerService` implementing Service, Configurable, ToolProvider.
 - Capabilities: `speaker_control`, `ai_tools`.
 - Requires: `entity_storage` (for aliases).
-- Optional: `configuration`, `text_to_speech` (for announce).
+- Optional: `configuration`, `text_to_speech` (for announce), `users`, `event_bus` (for browser-echo).
 - Speaker aliases stored in `speaker_aliases` entity collection with unique index on `alias` field. Alias collision detection against both existing speaker names and other aliases.
 - "Last used" speaker tracking — if no speakers specified, reuses previous target set or falls back to all.
 - `default_announce_speakers` config — list of speaker names used when no speakers are specified in an announce call (falls back before "last used" or "all").
 - **Announce flow**: SpeakerService.announce() generates TTS audio, writes to a workspace file, then calls `play_on_speakers(..., announce=True)`. The speaker backend's announce route (`audio_clip`) handles duck+play+restore. Silence padding is still handled by the TTS service (`silence_padding` config param on TTSConfig), not here.
 - **Per-speaker announce locks**: Announcements are serialized *per target speaker*, not globally. `_speaker_locks: dict[str, asyncio.Lock]` holds one lock per speaker ID, created lazily under `_speaker_locks_guard`. `announce()` resolves target IDs first, then acquires every target's lock in sorted-ID order (deadlock-free under overlapping sets) via `contextlib.AsyncExitStack` before calling `_announce_inner`. Result: two announces on disjoint speaker sets fan out concurrently; overlapping sets still serialize on the shared speaker. The `announce` ToolDefinition is flagged `parallel_safe=True` so the AI execution loop can `asyncio.gather` N announce calls, and the per-speaker locks handle the correctness guarantee underneath.
+
+### Multi-backend operation
+
+`SpeakerService` runs N backends simultaneously, keyed by `backend_name` in `self._backends: dict[str, SpeakerBackend]`. Speakers from each backend appear in `list_speakers()` with their ID namespaced as `<backend>:<native_id>` (e.g., `sonos:RINCON_AABBCC`, `browser:<user-uuid>`, `local:local`), and a `backend_name` field stamped in the `SpeakerInfo` for UI disambiguation.
+
+**Dispatch:** `play_on_speakers` resolves speaker names to namespaced IDs, groups them by backend via `_route_ids`, and fans out per-backend coroutines via `asyncio.gather`. Calls targeting speakers across multiple backends play in parallel (un-synchronized — Sonos S2 sync only applies within a Sonos group, and other backends have no grouping semantics).
+
+**Grouping:** `group_speakers` rejects targets that span multiple backends with a user-readable error (`ValueError`). Groups are inherently per-backend: Sonos has a real grouping primitive with atomic member replacement; local and browser are single-speaker concepts that don't support grouping.
+
+**Default targets:** when an AI tool calls `announce()` / `play_audio()` without explicit speakers, the call goes to the speakers in `default_announce_speakers` (config). If empty, it falls back to a "last used" set or all speakers. Selection does not prioritize backends; speakers from any loaded backend are fair game.
+
+**Primary backend:** `primary_backend` config (e.g., `"sonos"`, `"local"`, `"browser"`) is used for speaker discovery `list_speakers()` when no explicit backend is mentioned in the AI tool call. The config also gates which backend's `supports_grouping` property is checked for exposing `group_speakers` / `ungroup_speakers` tools — only backends with real grouping support expose those tools to the AI.
+
+**Browser-echo:** when an admin's `speaker.browser_echo` user pref is on, plays that target a non-browser speaker also fan out a copy to that admin's browser tab via `speaker.browser.play` events. Skipped when the explicit target list already includes the caller's own `browser:<user-id>` (would double-play). See [Per-user browser-echo fan-out](#per-user-browser-echo-fan-out) for full wiring details.
+
+**Migration:** boot-time migration `0001_namespace_speaker_aliases_and_config` namespaces legacy bare alias rows (stored before the multi-backend era) and rewrites the legacy `speaker.backend: <name>` config to `primary_backend + backends.<name>.enabled`. Handles gracefully when a plugin-provided backend fails to initialize during the migration.
 
 ### Configuration
 - Config model: `SpeakerConfig` in `src/gilbert/config.py`.
