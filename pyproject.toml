@@ -48,6 +48,7 @@ dependencies = [
     "gilbert-plugin-ngrok",
     "gilbert-plugin-ollama",
     "gilbert-plugin-openai",
+    "gilbert-plugin-openwakeword",
     "gilbert-plugin-openai-compatible",
     "gilbert-plugin-openrouter",
     "gilbert-plugin-porcupine",
@@ -81,6 +82,7 @@ gilbert-plugin-ngrok = { workspace = true }
 gilbert-plugin-ollama = { workspace = true }
 gilbert-plugin-openai = { workspace = true }
 gilbert-plugin-openai-compatible = { workspace = true }
+gilbert-plugin-openwakeword = { workspace = true }
 gilbert-plugin-openrouter = { workspace = true }
 gilbert-plugin-porcupine = { workspace = true }
 gilbert-plugin-qwen = { workspace = true }
@@ -132,9 +134,16 @@ exclude = [
 # wheels — leaving Intel Mac users unable to sync. 1.20.x is the last
 # series with Intel macOS wheels and is compatible with the chromadb
 # releases we use.
+#
+# tflite-runtime: ``openwakeword`` lists it as a Linux dep, but the
+# published wheels only cover Python 3.8–3.11. Override to a
+# marker that excludes Python 3.12+ so uv can resolve the workspace
+# on modern Pythons. openWakeWord falls back to onnxruntime (already in
+# the workspace) on Python 3.12+.
 [tool.uv]
 override-dependencies = [
     "onnxruntime<1.21",
+    "tflite-runtime>=2.8.0; sys_platform == 'linux' and python_version < '3.12'",
 ]
 
 [tool.pytest.ini_options]
