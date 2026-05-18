@@ -490,7 +490,12 @@ class MusicService(Service):
         speaker_svc = self._get_speaker_svc()
         if not isinstance(speaker_svc, SpeakerProvider):
             return False
-        return any(b.supports_repeat for b in speaker_svc.backends.values())
+        compat = self._backend.compatible_speaker_backends()
+        return any(
+            b.supports_repeat
+            for name, b in speaker_svc.backends.items()
+            if compat == frozenset({"*"}) or name in compat
+        )
 
     async def start_station(
         self,

@@ -275,3 +275,58 @@ async def test_validate_compatible_speakers_empty_input_returns_empty():
 
     result = await svc._validate_compatible_speakers(None)
     assert result == {}
+
+
+# --- Tests for supports_loop filtering by compatible backends ---
+
+
+def test_supports_loop_false_when_no_compatible_speaker_loaded():
+    """A Sonos music backend with only a browser speaker loaded reports supports_loop=False."""
+    from gilbert.core.services.music import MusicService
+    from gilbert.interfaces.speaker import SpeakerProvider
+
+    music_svc = MusicService()
+    music_svc._backend = MagicMock(supports_loop=True)
+    music_svc._backend.compatible_speaker_backends.return_value = frozenset({"sonos"})
+
+    # Speaker service with a browser backend that supports_repeat=True; sonos not loaded
+    fake_speaker_svc = MagicMock(spec=SpeakerProvider)
+    fake_browser_backend = MagicMock(supports_repeat=True)
+    fake_speaker_svc.backends = {"browser": fake_browser_backend}
+    music_svc._speaker_svc = fake_speaker_svc
+
+    assert music_svc.supports_loop is False
+
+
+def test_supports_loop_true_when_compatible_speaker_with_repeat_loaded():
+    """A Sonos music backend with a Sonos speaker backend loaded reports supports_loop=True."""
+    from gilbert.core.services.music import MusicService
+    from gilbert.interfaces.speaker import SpeakerProvider
+
+    music_svc = MusicService()
+    music_svc._backend = MagicMock(supports_loop=True)
+    music_svc._backend.compatible_speaker_backends.return_value = frozenset({"sonos"})
+
+    fake_speaker_svc = MagicMock(spec=SpeakerProvider)
+    fake_sonos_backend = MagicMock(supports_repeat=True)
+    fake_speaker_svc.backends = {"sonos": fake_sonos_backend}
+    music_svc._speaker_svc = fake_speaker_svc
+
+    assert music_svc.supports_loop is True
+
+
+def test_supports_loop_wildcard_compat_any_repeat_capable_backend_qualifies():
+    """A wildcard music backend reports supports_loop=True if any loaded speaker backend supports repeat."""
+    from gilbert.core.services.music import MusicService
+    from gilbert.interfaces.speaker import SpeakerProvider
+
+    music_svc = MusicService()
+    music_svc._backend = MagicMock(supports_loop=True)
+    music_svc._backend.compatible_speaker_backends.return_value = frozenset({"*"})
+
+    fake_speaker_svc = MagicMock(spec=SpeakerProvider)
+    fake_browser_backend = MagicMock(supports_repeat=True)
+    fake_speaker_svc.backends = {"browser": fake_browser_backend}
+    music_svc._speaker_svc = fake_speaker_svc
+
+    assert music_svc.supports_loop is True
