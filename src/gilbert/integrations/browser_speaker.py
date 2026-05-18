@@ -197,6 +197,13 @@ class BrowserSpeakerBackend(SpeakerBackend):
     # ── Playback ───────────────────────────────────────────────────
 
     async def play_uri(self, request: PlayRequest) -> None:
+        """Publish a ``speaker.browser.play`` event for the target user.
+
+        RBAC (admin/SYSTEM can target any browser; regular users can only
+        target their own) is enforced at the service layer by
+        ``SpeakerService._check_browser_target_permissions`` before this
+        backend is reached.  The backend itself does not double-gate.
+        """
         if self._bus is None:
             raise RuntimeError(
                 "Browser speaker backend has no event bus — was the "
@@ -209,16 +216,7 @@ class BrowserSpeakerBackend(SpeakerBackend):
             raise RuntimeError(
                 "Browser speaker: no target user — play_uri must be "
                 "called inside an authenticated request context, and "
-                "speaker_ids (if provided) must be ``browser:<user_id>``."
-            )
-
-        # Strict per-user scoping: a user can only target their own
-        # browser. Admins can be allowed later; for now reject cross-
-        # user playback to keep private chats genuinely private.
-        if user.user_id and user.user_id != target_user_id:
-            raise PermissionError(
-                "Browser speaker: a user can only play to their own browser "
-                f"(caller={user.user_id!r}, target={target_user_id!r})."
+                "speaker_ids (if provided) must contain a non-empty user id."
             )
 
         volume = request.volume if request.volume is not None else self._default_volume
@@ -284,16 +282,15 @@ class BrowserSpeakerBackend(SpeakerBackend):
 
     @staticmethod
     def _resolve_target_user_id(request: PlayRequest, caller_user_id: str) -> str:
-        """Extract the target user id from PlayRequest.speaker_ids, or
-        fall back to the calling user when no explicit target was set.
+        """Extract the target user id from PlayRequest.speaker_ids.
 
-        Speaker ids carry the form ``browser:<user_id>``. The SpeakerService
-        resolves names to ids before reaching the backend, so any
-        ``speaker_ids`` we see here are either the canonical id we
-        minted in ``list_speakers`` or junk we should ignore.
+        The service-level ``_route_ids`` strips the ``"browser:"`` prefix
+        before reaching the backend, so what we see here is the native id
+        — which for the browser backend IS the user id.  Falls back to the
+        caller when no target was set explicitly.
         """
         for sid in request.speaker_ids or ():
-            if sid.startswith(_SPEAKER_ID_PREFIX):
-                return sid[len(_SPEAKER_ID_PREFIX) :]
+            if sid:
+                return sid
         return caller_user_id
 

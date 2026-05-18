@@ -177,18 +177,23 @@ async def test_play_uri_publishes_event_scoped_to_caller(
 
 
 @pytest.mark.asyncio
-async def test_play_uri_rejects_cross_user_target(
+async def test_play_uri_does_not_enforce_cross_user_at_backend_layer(
     backend: BrowserSpeakerBackend, bus: StubBus
 ) -> None:
+    """Cross-user RBAC is enforced by SpeakerService._check_browser_target_permissions,
+    NOT by the backend itself.  The backend publishes to whatever target_user_id is
+    passed in speaker_ids; the service is the gating layer.
+    """
     backend.set_event_bus_provider(StubBusProvider(bus))
     await backend.initialize({})
     set_current_user(_alice())
-    # Alice tries to play to Bob's browser — must be refused.
-    with pytest.raises(PermissionError, match="own browser"):
-        await backend.play_uri(
-            PlayRequest(uri="http://x", speaker_ids=["browser:user-bob"])
-        )
-    assert bus.published == []
+    # Backend does not raise — service-level enforcement is tested separately
+    # in test_speaker_service_browser_permissions.py.
+    await backend.play_uri(
+        PlayRequest(uri="http://x", speaker_ids=["user-bob"])
+    )
+    assert len(bus.published) == 1
+    assert bus.published[0].data["user_id"] == "user-bob"
 
 
 @pytest.mark.asyncio
@@ -309,6 +314,57 @@ def test_to_browser_url_leaves_non_output_paths_alone() -> None:
 def test_to_browser_url_handles_empty_string() -> None:
     from gilbert.interfaces.speaker import to_browser_url
     assert to_browser_url("") == ""
+
+
+@pytest.mark.asyncio
+async def test_play_uri_publishes_event_for_native_id_target(
+    backend: BrowserSpeakerBackend, bus: StubBus
+) -> None:
+    """speaker_ids at backend boundary are already-stripped native ids
+    (the ``browser:`` prefix is stripped by SpeakerService._route_ids).
+    play_uri must resolve them as user ids, not look for a stale prefix.
+    """
+    backend.activate(conn_id="c1", user_id="user-alice", display_name="Alice")
+    backend.set_event_bus_provider(StubBusProvider(bus))
+    await backend.initialize({})
+
+    # Caller is SYSTEM (matching the scheduler's AI fire path).
+    # Target IS Alice (post-strip native id, no "browser:" prefix).
+    set_current_user(UserContext.SYSTEM)
+
+    await backend.play_uri(
+        PlayRequest(
+            uri="http://example.com/x.mp3",
+            speaker_ids=["user-alice"],  # native, post-strip
+            volume=80,
+            title="Test",
+        )
+    )
+
+    # Event should have published with user_id="user-alice"
+    assert len(bus.published) == 1
+    event = bus.published[0]
+    assert event.event_type == "speaker.browser.play"
+    assert event.data["user_id"] == "user-alice"
+
+
+@pytest.mark.asyncio
+async def test_play_uri_allows_system_caller_to_target_any_user(
+    backend: BrowserSpeakerBackend, bus: StubBus
+) -> None:
+    """SYSTEM (and admin) callers can target any user's browser.
+    Service-level RBAC is the gate; the backend no longer double-enforces it.
+    """
+    backend.activate(conn_id="c1", user_id="user-alice", display_name="Alice")
+    backend.set_event_bus_provider(StubBusProvider(bus))
+    await backend.initialize({})
+    set_current_user(UserContext.SYSTEM)
+
+    # Should NOT raise PermissionError — SYSTEM bypasses the backend gate.
+    await backend.play_uri(
+        PlayRequest(uri="http://x/clip.mp3", speaker_ids=["user-alice"], volume=80)
+    )
+    assert len(bus.published) == 1
 
 
 @pytest.mark.asyncio
