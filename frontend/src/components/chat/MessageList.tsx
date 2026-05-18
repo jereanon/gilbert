@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { TurnBubble } from "./TurnBubble";
-import { BrowserAudioBubbles } from "./BrowserAudioBubbles";
 import type { ChatTurn } from "@/types/chat";
 import type { UIBlock } from "@/types/ui";
 import { UIBlockRenderer } from "@/components/ui/UIBlockRenderer";
@@ -134,10 +133,6 @@ export function MessageList({
             <UIBlockRenderer block={block} onSubmit={onBlockSubmit} />
           </div>
         ))}
-
-        {conversationId ? (
-          <BrowserAudioBubbles conversationId={conversationId} />
-        ) : null}
 
         <div ref={bottomRef} />
       </div>

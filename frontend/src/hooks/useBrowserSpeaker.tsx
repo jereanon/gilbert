@@ -190,14 +190,6 @@ export function useBrowserSpeaker(): BrowserSpeakerStore {
   return ctx;
 }
 
-/**
- * Transitional stub — removed after BrowserAudioBubbles is deleted (Hdr-Task 9).
- * Returns an empty array typed as PlayItem[] so BrowserAudioBubbles still compiles.
- */
-export function useBrowserSpeakerClips(_conversationId: string): PlayItem[] {
-  return [];
-}
-
 function clampVolume(raw: unknown): number {
   const n = typeof raw === "number" ? raw : Number(raw);
   if (!Number.isFinite(n)) return 80;
