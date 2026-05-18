@@ -438,6 +438,7 @@ class SpeakerService(Service):
                     description=f"Enable the '{name}' speaker backend.",
                     default=False,
                     restart_required=True,
+                    backend_param=True,
                 )
             )
             for bp in cls.backend_config_params():

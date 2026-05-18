@@ -223,7 +223,8 @@ async def test_config_params_emits_per_backend_sections_and_primary_backend():
     import gilbert.integrations.browser_speaker  # noqa: F401
 
     svc = SpeakerService()
-    keys = {p.key for p in svc.config_params()}
+    params = svc.config_params()
+    keys = {p.key for p in params}
     # Per-backend sections must appear for every registered backend
     backend_names = set(SpeakerBackend.registered_backends())
     for name in backend_names:
@@ -231,6 +232,76 @@ async def test_config_params_emits_per_backend_sections_and_primary_backend():
     assert "primary_backend" in keys
     # Legacy single-select must be removed
     assert "backend" not in keys
+
+
+@pytest.mark.asyncio
+async def test_config_params_enable_toggle_has_backend_param_true():
+    """backends.<name>.enabled must have backend_param=True so the UI groups
+    it inside the per-backend Card.  Without this flag the enable toggle falls
+    into the flat 'service params' group, is never grouped with its backend's
+    sub-params (bug 3), always renders unconditionally visible (bug 2), and
+    the stored nested value can't be read back via the flat key lookup used
+    for service params — causing the toggle to always appear OFF (bug 1)."""
+    import gilbert.integrations.local_speaker  # noqa: F401
+    import gilbert.integrations.browser_speaker  # noqa: F401
+
+    svc = SpeakerService()
+    params_by_key = {p.key: p for p in svc.config_params()}
+
+    backend_names = set(SpeakerBackend.registered_backends())
+    for name in backend_names:
+        param = params_by_key.get(f"backends.{name}.enabled")
+        assert param is not None, f"backends.{name}.enabled not in config_params()"
+        assert param.backend_param, (
+            f"backends.{name}.enabled is missing backend_param=True — "
+            "the UI will mis-categorize it, breaking the per-backend Card "
+            "layout (bug 3), conditional visibility (bug 2), and value "
+            "display round-trip (bug 1)"
+        )
+
+
+@pytest.mark.asyncio
+async def test_on_config_changed_enables_backend_from_nested_config():
+    """Verify that on_config_changed correctly reads backends from the nested
+    config dict and initializes/drops backends accordingly.
+
+    This simulates what the ConfigurationService does after persisting
+    speaker.backends.local.enabled = True — it calls on_config_changed with
+    the full section dict, which must have backends as a nested dict (not
+    flat dotted keys).
+    """
+    svc = SpeakerService()
+    svc._enabled = True
+
+    # Start with no backends loaded.
+    assert svc._backends == {}
+
+    # Simulate the section dict as stored in entity storage after
+    # setting backends.fake_a.enabled = True.
+    config_with_enabled = {
+        "enabled": True,
+        "backends": {
+            "fake_a": {"enabled": True},
+            "fake_b": {"enabled": False},
+        },
+        "primary_backend": "",
+    }
+    await svc.on_config_changed(config_with_enabled)
+    assert "fake_a" in svc._backends, "fake_a backend should be loaded when enabled=True"
+    assert "fake_b" not in svc._backends, "fake_b backend should not be loaded when enabled=False"
+
+    # Now flip: disable fake_a and enable fake_b.
+    config_swapped = {
+        "enabled": True,
+        "backends": {
+            "fake_a": {"enabled": False},
+            "fake_b": {"enabled": True},
+        },
+        "primary_backend": "",
+    }
+    await svc.on_config_changed(config_swapped)
+    assert "fake_a" not in svc._backends, "fake_a should be dropped after disabling"
+    assert "fake_b" in svc._backends, "fake_b backend should be loaded when enabled=True"
 
 
 @pytest.mark.asyncio
