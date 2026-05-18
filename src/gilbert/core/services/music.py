@@ -40,7 +40,7 @@ from gilbert.interfaces.music import (
     Playable,
 )
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
-from gilbert.interfaces.speaker import LoopMode, NowPlaying, PlaybackState, SpeakerProvider
+from gilbert.interfaces.speaker import LoopMode, NowPlaying, PlaybackState, SpeakerProvider, split_speaker_id
 from gilbert.interfaces.tools import (
     ToolDefinition,
     ToolParameter,
@@ -376,6 +376,34 @@ class MusicService(Service):
 
     # --- Core operations ---
 
+    async def _validate_compatible_speakers(
+        self, speaker_names: list[str] | None
+    ) -> dict[str, str]:
+        """Resolve names → namespaced ids; reject targets the music backend can't drive.
+
+        Returns the resolved mapping ``{name: namespaced_id}`` for downstream
+        use; raises ``MusicSearchUnavailableError`` if any target is on an
+        incompatible speaker backend. Empty / None inputs return an empty dict.
+        """
+        if not speaker_names:
+            return {}
+        speaker_svc = self._get_speaker_svc()
+        if speaker_svc is None or self._backend is None:
+            return {}
+        resolved = await speaker_svc.resolve_names(speaker_names)
+        compat = self._backend.compatible_speaker_backends()
+        if compat == frozenset({"*"}):
+            return resolved
+        for name, sid in resolved.items():
+            backend_name, _ = split_speaker_id(sid)
+            if backend_name not in compat:
+                raise MusicSearchUnavailableError(
+                    f"music backend {self._backend.backend_name!r} can't play to "
+                    f"speaker {name!r} ({backend_name} backend) — "
+                    f"try a speaker on one of: {sorted(compat)}"
+                )
+        return resolved
+
     def _require_backend(self) -> MusicBackend:
         if self._backend is None:
             raise RuntimeError("Music service is not enabled")
@@ -411,6 +439,7 @@ class MusicService(Service):
         sites — AI tools, slash commands, UI buttons — represent user
         intent.
         """
+        await self._validate_compatible_speakers(speaker_names)
         speaker_svc = self._get_speaker_svc()
         if speaker_svc is None:
             raise RuntimeError("Speaker service is not available — cannot play music")
@@ -479,6 +508,7 @@ class MusicService(Service):
         queue. Returns the ``Playable`` for the first track. Raises
         ``RuntimeError`` if the backend doesn't support stations.
         """
+        await self._validate_compatible_speakers(speaker_names)
         if not self.supports_stations:
             raise RuntimeError(
                 "Music backend does not support stations"
@@ -558,6 +588,7 @@ class MusicService(Service):
         action taken) and ``True`` when a Play was actually issued.
         Raises ``RuntimeError`` if the backend doesn't expose a queue.
         """
+        await self._validate_compatible_speakers(speaker_names)
         if not self.supports_queue:
             raise RuntimeError(
                 "Music backend does not support queue operations"
@@ -595,6 +626,7 @@ class MusicService(Service):
         ``kind="queue_add"`` so subscribers can distinguish a queue
         append from a fresh play.
         """
+        await self._validate_compatible_speakers(speaker_names)
         if not self.supports_queue:
             raise RuntimeError(
                 "Music backend does not support queue operations"
