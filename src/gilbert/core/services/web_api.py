@@ -258,6 +258,23 @@ class WebApiService(Service):
                 "items": [],
             },
             {
+                # Parent for plugin-contributed media sources (radio,
+                # music libraries, etc.). Has no built-in children;
+                # ``items`` is filled entirely by plugin
+                # ``ui_routes(... nav_parent_group="media")`` entries.
+                # ``placeholder_group`` tells the visibility filter to
+                # drop the group if no plugin populated it — otherwise
+                # an empty-items entry would render as a no-op leaf.
+                "key": "media",
+                "label": "Media",
+                "description": "Listen to radio, music, and other audio sources",
+                "url": "",
+                "icon": "headphones",
+                "required_role": "user",
+                "items": [],
+                "placeholder_group": True,
+            },
+            {
                 "key": "mcp",
                 "label": "MCP",
                 "description": "Model Context Protocol",
@@ -491,6 +508,11 @@ class WebApiService(Service):
                         "items": visible_items,
                     }
                 )
+            elif group.get("placeholder_group"):
+                # Plugin-extension parent (e.g. Media). Hide entirely
+                # when no plugin contributed a child — without this,
+                # the empty-items entry would render as a dead leaf.
+                continue
             else:
                 # Leaf: filter by its own role/capability.
                 if not _visible(group):

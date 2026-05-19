@@ -11,10 +11,13 @@ resolution-markers = [
 members = [
     "gilbert",
     "gilbert-plugin-american-standard",
+    "gilbert-plugin-andon-fm",
     "gilbert-plugin-anthropic",
     "gilbert-plugin-arr",
     "gilbert-plugin-bedrock",
     "gilbert-plugin-browser",
+    "gilbert-plugin-current-data-sync",
+    "gilbert-plugin-current-sales-assistant",
     "gilbert-plugin-deepgram",
     "gilbert-plugin-deepseek",
     "gilbert-plugin-elevenlabs",
@@ -1007,6 +1010,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "faster-whisper" },
     { name = "gilbert-plugin-american-standard" },
+    { name = "gilbert-plugin-andon-fm" },
     { name = "gilbert-plugin-anthropic" },
     { name = "gilbert-plugin-arr" },
     { name = "gilbert-plugin-bedrock" },
@@ -1078,6 +1082,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.135.3" },
     { name = "faster-whisper", specifier = ">=1.2.1" },
     { name = "gilbert-plugin-american-standard", virtual = "std-plugins/american-standard" },
+    { name = "gilbert-plugin-andon-fm", virtual = "std-plugins/andon-fm" },
     { name = "gilbert-plugin-anthropic", virtual = "std-plugins/anthropic" },
     { name = "gilbert-plugin-arr", virtual = "std-plugins/arr" },
     { name = "gilbert-plugin-bedrock", virtual = "std-plugins/bedrock" },
@@ -1149,6 +1154,11 @@ dependencies = [
 requires-dist = [{ name = "nexia", specifier = ">=2.7.0" }]
 
 [[package]]
+name = "gilbert-plugin-andon-fm"
+version = "1.0.0"
+source = { virtual = "std-plugins/andon-fm" }
+
+[[package]]
 name = "gilbert-plugin-anthropic"
 version = "1.0.0"
 source = { virtual = "std-plugins/anthropic" }
@@ -1189,6 +1199,16 @@ requires-dist = [
     { name = "cryptography", specifier = ">=42" },
     { name = "playwright", specifier = ">=1.45" },
 ]
+
+[[package]]
+name = "gilbert-plugin-current-data-sync"
+version = "1.0.0"
+source = { virtual = "local-plugins/current-data-sync" }
+
+[[package]]
+name = "gilbert-plugin-current-sales-assistant"
+version = "1.0.0"
+source = { virtual = "local-plugins/current-sales-assistant" }
 
 [[package]]
 name = "gilbert-plugin-deepgram"

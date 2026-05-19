@@ -150,6 +150,75 @@ async def test_dashboard_non_admin_does_not_see_restart(
         assert "restart_host" not in actions
 
 
+async def test_media_group_hidden_when_no_plugin_contributes(
+    service: WebApiService,
+) -> None:
+    """The Media nav group is a placeholder for plugin-contributed
+    ``ui_routes(... nav_parent_group="media")`` entries — it has no
+    built-in children. When no plugin populates it, the visibility
+    filter must drop the group entirely, not render it as a dead
+    leaf (``items: []`` would otherwise hit the leaf branch and the
+    nav bar would render an unclickable "Media" entry).
+
+    Regression guard for the ``placeholder_group`` flag in
+    ``web_api.py``."""
+    gilbert = _make_gilbert(acl=_FakeAcl())
+    conn = _make_conn(gilbert, user_level=0)  # admin sees everything else
+
+    result = await service._ws_dashboard_get(conn, {"id": "dash-media-empty"})
+
+    assert result is not None
+    keys = {g["key"] for g in result["nav"]}
+    assert "media" not in keys, (
+        "Media group must not appear when no plugin contributes children"
+    )
+
+
+async def test_media_group_appears_when_plugin_contributes(
+    service: WebApiService,
+) -> None:
+    """When a loaded plugin's ``ui_routes()`` adds a child under
+    ``nav_parent_group="media"``, the placeholder group flips into a
+    real navigable group with that child as its single item."""
+    from gilbert.interfaces.plugin import UIRoute
+
+    class _StubPlugin:
+        def metadata(self) -> Any:
+            return SimpleNamespace(name="andon-fm")
+
+        def ui_routes(self) -> list[UIRoute]:
+            return [
+                UIRoute(
+                    path="/media/andon-fm",
+                    panel_id="andon_fm.page",
+                    label="Andon FM",
+                    icon="radio",
+                    required_role="user",
+                    add_to_nav=True,
+                    nav_parent_group="media",
+                )
+            ]
+
+        def nav_contributions(self) -> list[Any]:
+            return []
+
+    gilbert = _make_gilbert(acl=_FakeAcl())
+    gilbert.list_loaded_plugins = lambda: [
+        SimpleNamespace(plugin=_StubPlugin())
+    ]
+    conn = _make_conn(gilbert, user_level=0)
+
+    result = await service._ws_dashboard_get(conn, {"id": "dash-media-full"})
+
+    assert result is not None
+    media = next((g for g in result["nav"] if g["key"] == "media"), None)
+    assert media is not None, "Media group must appear once a plugin contributes"
+    labels = [i["label"] for i in media["items"]]
+    assert "Andon FM" in labels
+    # default url should fall back to the contributed child's path
+    assert media["url"] == "/media/andon-fm"
+
+
 async def test_dashboard_group_default_url_skips_action_only_items(
     service: WebApiService,
 ) -> None:

@@ -32,6 +32,7 @@ dependencies = [
     # means a plain ``uv sync`` resolves every plugin's deps into the
     # shared venv, so users don't have to remember ``--all-packages``.
     "gilbert-plugin-american-standard",
+    "gilbert-plugin-andon-fm",
     "gilbert-plugin-anthropic",
     "gilbert-plugin-arr",
     "gilbert-plugin-bedrock",
@@ -65,6 +66,7 @@ dependencies = [
 
 [tool.uv.sources]
 gilbert-plugin-american-standard = { workspace = true }
+gilbert-plugin-andon-fm = { workspace = true }
 gilbert-plugin-anthropic = { workspace = true }
 gilbert-plugin-arr = { workspace = true }
 gilbert-plugin-bedrock = { workspace = true }

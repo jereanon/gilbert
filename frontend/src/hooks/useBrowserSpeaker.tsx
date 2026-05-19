@@ -135,6 +135,22 @@ export function BrowserSpeakerProvider({ children }: { children: ReactNode }) {
     return subscribe("speaker.browser.play", handler);
   }, [enabled, subscribe]);
 
+  // The browser backend publishes ``speaker.browser.stop`` when a
+  // ``stop_speakers`` call hits the user's browser target. Mirror it
+  // in the SPA so the <audio> element actually stops — otherwise a
+  // long-running stream (e.g. an internet radio station) keeps playing
+  // after the user pressed stop in the UI.
+  useEffect(() => {
+    const handler = () => {
+      const el = audioRef.current;
+      if (el && !el.paused) {
+        el.pause();
+      }
+      setIsPlaying(false);
+    };
+    return subscribe("speaker.browser.stop", handler);
+  }, [subscribe]);
+
   const setEnabled = useCallback((v: boolean) => {
     persistEnabled(v);
     setEnabledState(v);
