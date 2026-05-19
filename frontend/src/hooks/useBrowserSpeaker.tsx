@@ -109,6 +109,14 @@ export function BrowserSpeakerProvider({ children }: { children: ReactNode }) {
 
   // Activation sync — fire activate/deactivate to the server based on
   // [enabled, connected]. Re-activates on reconnect if enabled is true.
+  // The backend rejects activations from an unauthenticated connection
+  // (race: SPA fires activate the instant ``connected`` flips, but the
+  // WS may not have completed its auth handshake yet, so ``user_id``
+  // is briefly empty). The handler returns ``{status: "error", ...}``
+  // rather than throwing, so we explicitly inspect ``status`` here and
+  // leave ``lastSyncedRef`` un-flipped on failure — the next state
+  // change (typically the auth-completion re-render) re-fires and
+  // lands cleanly.
   const lastSyncedRef = useRef<boolean>(false);
   useEffect(() => {
     const want = enabled && connected;
@@ -117,10 +125,15 @@ export function BrowserSpeakerProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     (async () => {
       try {
-        if (want) {
-          await rpc({ type: "browser_speaker.activate" });
-        } else {
-          await rpc({ type: "browser_speaker.deactivate" });
+        const result = want
+          ? await rpc<{ status?: string }>({
+              type: "browser_speaker.activate",
+            })
+          : await rpc<{ status?: string }>({
+              type: "browser_speaker.deactivate",
+            });
+        if (!cancelled && result?.status === "error") {
+          lastSyncedRef.current = !want;
         }
       } catch {
         // Treat as transient; next state change retries.

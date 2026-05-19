@@ -54,6 +54,31 @@ async def test_ws_activate_registers_connection_on_browser_backend(
 
 
 @pytest.mark.asyncio
+async def test_ws_activate_rejects_anonymous_connection(
+    svc_with_browser_backend: SpeakerService,
+) -> None:
+    """When the WS connection has no user_id (auth hasn't completed
+    or the connection is anonymous), activate must refuse. Otherwise
+    the backend would register a phantom speaker under the empty
+    user_id that no real user's filter (``browser:<user_id>``) can
+    match, hiding the user's tab from chat ``/speaker list`` and
+    the Andon FM picker. Refusing here lets the SPA retry once
+    auth completes."""
+    svc = svc_with_browser_backend
+    conn = MagicMock()
+    conn.connection_id = "c1"
+    conn.user_id = ""
+    conn.display_name = ""
+
+    result = await svc._ws_browser_speaker_activate(conn, {})
+
+    assert result["status"] == "error"
+    assert "authenticated" in result["error"]
+    backend = svc._backends["browser"]
+    assert backend._active_connections == {}
+
+
+@pytest.mark.asyncio
 async def test_ws_deactivate_removes_connection(
     svc_with_browser_backend: SpeakerService,
 ) -> None:

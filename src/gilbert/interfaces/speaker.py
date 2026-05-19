@@ -442,10 +442,31 @@ class CachedSpeakerLister(Protocol):
     Used by ``ConfigurationService._resolve_dynamic_choices`` to
     populate ``speakers`` dropdowns on settings pages without
     duck-typing the service instance. Cache is refreshed on service
-    start; consumers read it synchronously.
+    start, on backend toggle, and periodically; consumers read it
+    synchronously.
     """
 
     @property
     def cached_speakers(self) -> list[SpeakerInfo]:
         """Return the last-known speaker list from the service cache."""
+        ...
+
+
+@runtime_checkable
+class SpeakerLister(Protocol):
+    """Protocol for live, on-demand speaker enumeration.
+
+    Implemented by ``SpeakerService`` and exposed via the
+    ``speaker_control`` capability. Returns a fresh union of every
+    loaded backend's ``list_speakers()`` output, namespaced and
+    user-filtered the same way the chat ``/speaker list`` tool sees
+    them: non-admin callers see every non-browser speaker plus
+    their own browser-tab entry; admins see everything. Prefer this
+    over ``CachedSpeakerLister.cached_speakers`` when freshness
+    matters more than cost (e.g. a user-triggered picker dialog).
+    """
+
+    async def list_speakers(self) -> list[SpeakerInfo]:
+        """Return every speaker currently known to every loaded
+        backend, filtered to the caller's visibility."""
         ...

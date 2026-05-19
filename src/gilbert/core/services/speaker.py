@@ -47,6 +47,14 @@ _ALIAS_COLLECTION = "speaker_aliases"
 # Magic aliases that resolve to the caller's own browser
 _MY_BROWSER_ALIASES = frozenset({"my browser", "my speaker", "for me", "me"})
 
+# Periodic speaker-cache refresh. Backends like Sonos use async
+# zeroconf discovery that finishes after ``initialize()`` returns;
+# this keeps ``cached_speakers`` close to live so settings-page
+# dropdowns and other sync consumers see the actual set without
+# a manual restart.
+_REFRESH_CACHE_JOB = "speaker.refresh_cached_speakers"
+_REFRESH_CACHE_INTERVAL_SECONDS = 30
+
 
 class SpeakerService(Service):
     """Exposes a SpeakerBackend as a service with speaker control and announce capabilities."""
@@ -83,6 +91,10 @@ class SpeakerService(Service):
         self._event_bus_provider: Any = None
         # Optional access-control provider for role-aware filtering.
         self._access_control: AccessControlProvider | None = None
+        # Optional scheduler — used for the periodic cache refresh
+        # job. ``None`` when scheduler isn't loaded; cache then only
+        # refreshes at start / on browser activate / deactivate.
+        self._scheduler: Any = None
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -90,7 +102,13 @@ class SpeakerService(Service):
             capabilities=frozenset({"speaker_control", "ai_tools", "ws_handlers"}),
             requires=frozenset({"entity_storage"}),
             optional=frozenset(
-                {"configuration", "text_to_speech", "event_bus", "access_control"}
+                {
+                    "configuration",
+                    "text_to_speech",
+                    "event_bus",
+                    "access_control",
+                    "scheduler",
+                }
             ),
             toggleable=True,
             toggle_description="Speaker playback and control",
@@ -128,13 +146,14 @@ class SpeakerService(Service):
         """Last-known speaker list (populated after start)."""
         return list(self._speaker_cache)
 
-    async def list_speakers(self) -> list[SpeakerInfo]:
-        """Return speakers across all loaded backends.
+    async def _list_speakers_unfiltered(self) -> list[SpeakerInfo]:
+        """System-wide union of every backend's speakers.
 
-        Each ``SpeakerInfo.speaker_id`` is namespaced as ``<backend>:<native>``
-        and ``backend_name`` is stamped. If any single backend's ``list_speakers``
-        raises, the failure is logged and that backend's slice is omitted; other
-        backends still contribute.
+        Internal helper — bypasses the caller-visibility filter that
+        ``list_speakers`` applies. Used by the cache refresh path so
+        ``cached_speakers`` doesn't lock in whatever user happened to
+        trigger the refresh, and by any caller that genuinely wants
+        the unfiltered view.
         """
         if not self._backends:
             return []
@@ -146,10 +165,31 @@ class SpeakerService(Service):
         merged: list[SpeakerInfo] = []
         for (name, _), result in zip(items, results, strict=True):
             if isinstance(result, BaseException):
-                logger.warning("speaker backend '%s' list_speakers failed: %s", name, result)
+                logger.warning(
+                    "speaker backend '%s' list_speakers failed: %s",
+                    name,
+                    result,
+                )
                 continue
             for s in result:
-                merged.append(replace(s, speaker_id=f"{name}:{s.speaker_id}", backend_name=name))
+                merged.append(
+                    replace(
+                        s,
+                        speaker_id=f"{name}:{s.speaker_id}",
+                        backend_name=name,
+                    )
+                )
+        return merged
+
+    async def list_speakers(self) -> list[SpeakerInfo]:
+        """Return speakers across all loaded backends.
+
+        Each ``SpeakerInfo.speaker_id`` is namespaced as
+        ``<backend>:<native>`` and ``backend_name`` is stamped.
+        Non-admin callers see every non-browser speaker plus their own
+        browser-tab entry; admins see every speaker on every backend.
+        """
+        merged = await self._list_speakers_unfiltered()
         from gilbert.interfaces.context import get_current_user
 
         user = get_current_user()
@@ -255,6 +295,28 @@ class SpeakerService(Service):
                 unique=True,
             )
         )
+
+        # Periodic cache refresh — backends like Sonos use async
+        # zeroconf discovery that finishes after ``initialize()``
+        # returns, so the cache populated by ``_reinit_backends``
+        # above is empty of Sonos until discovery settles. A short
+        # interval here keeps ``choices_from="speakers"`` dropdowns
+        # in Settings honest without forcing every read to do a live
+        # fan-out.
+        from gilbert.interfaces.scheduler import (
+            Schedule,
+            SchedulerProvider,
+        )
+
+        scheduler = resolver.get_capability("scheduler")
+        if isinstance(scheduler, SchedulerProvider):
+            self._scheduler = scheduler
+            scheduler.add_job(
+                name=_REFRESH_CACHE_JOB,
+                schedule=Schedule.every(_REFRESH_CACHE_INTERVAL_SECONDS),
+                callback=self._refresh_cached_speakers,
+                system=True,
+            )
 
         logger.info("Speaker service started")
 
@@ -362,11 +424,16 @@ class SpeakerService(Service):
     async def _refresh_cached_speakers(self) -> None:
         """Refresh the cached speaker list from all loaded backends.
 
+        Stores the *unfiltered* system-wide view — the cache is shared
+        across all callers, so locking in one user's filtered view
+        would hide other users' browsers and break admin reads.
+        Consumers that need per-user filtering apply it on read.
+
         Swallows any exceptions so a backend that fails discovery on
         startup doesn't prevent other backends from being cached.
         """
         try:
-            self._speaker_cache = await self.list_speakers()
+            self._speaker_cache = await self._list_speakers_unfiltered()
         except Exception:
             logger.debug("Could not refresh speaker cache", exc_info=True)
 
@@ -512,6 +579,15 @@ class SpeakerService(Service):
         return await invoke_backend_action(self._backends.get(self._backend_name), key, payload)
 
     async def stop(self) -> None:
+        if self._scheduler is not None:
+            try:
+                self._scheduler.remove_job(_REFRESH_CACHE_JOB, force=True)
+            except Exception:
+                logger.debug(
+                    "Failed to remove speaker cache refresh job",
+                    exc_info=True,
+                )
+            self._scheduler = None
         for backend in list(self._backends.values()):
             await backend.close()
 
@@ -1392,6 +1468,19 @@ class SpeakerService(Service):
             return {"status": "error", "error": "browser speaker backend not loaded"}
         conn_id = conn.connection_id
         user_id = conn.user_id or ""
+        if not user_id:
+            # Refuse anonymous activations — the backend keys speakers
+            # by user_id and the visibility filter in ``list_speakers``
+            # checks ``browser:<user_id>``. Registering under "" would
+            # create a phantom speaker no real user can see or target
+            # and would mask the underlying race (typically: the SPA
+            # fired activate before auth finished). The SPA retries on
+            # state change, so returning an error here lets the next
+            # ``user``-bound attempt land cleanly.
+            return {
+                "status": "error",
+                "error": "browser speaker requires an authenticated connection",
+            }
         display_name = conn.display_name
         backend.activate(conn_id=conn_id, user_id=user_id, display_name=display_name)
         # Ensure registration vanishes when the WS drops, even if the
