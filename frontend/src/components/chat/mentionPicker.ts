@@ -97,10 +97,21 @@ export function renderMentionMarkup(member: {
   user_id: string;
   display_name: string;
 }): string {
-  // Escape any ``]`` in the display name (the tokenizer regex rejects
-  // it; a name like "Alice [Admin]" would otherwise break parsing).
-  const safeName = member.display_name.replace(/[\]\n]/g, " ");
-  return `@[${safeName}](${member.user_id}) `;
+  // Inserts the visible-only form ``@<DisplayName> ``. The structured
+  // ``@[Name](user_id)`` tag is for storage + rendering, NOT for the
+  // chat input — surfacing the user_id in the textarea was disorienting
+  // ("@[Dylan](usr_444d0d46df3b)" is not what a person expects to see
+  // when they pick a name from a dropdown).
+  //
+  // The backend's ``resolve_bare_mentions_to_structured`` rewrites
+  // ``@<Name>`` to the structured form at send time (case-insensitive
+  // match against the room's member list), so persistence + chip
+  // rendering + notifications still get the durable form.
+  //
+  // Newlines stripped because they'd break the visible flow; otherwise
+  // the display name passes through unchanged.
+  const safeName = member.display_name.replace(/\n/g, " ");
+  return `@${safeName} `;
 }
 
 /**

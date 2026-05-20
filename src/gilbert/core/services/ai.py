@@ -5929,12 +5929,30 @@ class AIService(Service):
                     filter_mentions_to_members,
                     mentions_gilbert,
                     publish_event,
+                    resolve_bare_mentions_to_structured,
                 )
 
                 # ``is_shared`` was set from ``conv_data.get("shared")``
                 # so we know conv_data is a dict at this point.
                 assert conv_data is not None
                 assert conversation_id is not None
+
+                # Rewrite bare ``@Name`` to ``@[Name](user_id)`` against
+                # the room's member list. The mention picker on the SPA
+                # inserts the visible ``@Name`` form to avoid surfacing
+                # raw user_ids in the chat input — the structured form
+                # is reconstituted server-side here so persistence,
+                # notifications, chip rendering, and the
+                # mentions-gilbert detector all see the durable form
+                # exactly as if the user had typed it. Already-
+                # structured tags (e.g. forwarded from elsewhere) pass
+                # through untouched because the regex doesn't match
+                # ``@[``. This is the same helper that rewrites Gilbert's
+                # own AI replies in ``_postprocess_assistant_mentions``.
+                room_members_list = conv_data.get("members", []) or []
+                message, _ = resolve_bare_mentions_to_structured(
+                    message, room_members_list
+                )
 
                 addressed = mentions_gilbert(message) or is_slash_command
                 tagged_message = f"[{conn.user_ctx.display_name}]: {message}"
@@ -5946,7 +5964,7 @@ class AIService(Service):
                 # a real mention for notification purposes.
                 room_member_ids = {
                     str(m.get("user_id", ""))
-                    for m in conv_data.get("members", [])
+                    for m in room_members_list
                     if m.get("user_id")
                 }
                 mentioned_ids, mentions_gilbert_tag = filter_mentions_to_members(
