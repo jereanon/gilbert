@@ -57,6 +57,14 @@ export function ChatSidebarContent({
             shared.map((conv) => {
               const isMember = conv.is_member !== false;
               const isInvited = conv.is_invited === true;
+              // Highlight rows with unread mentions — green left-border
+              // + faint tint so it draws the eye even before the user
+              // reads the @N count badge on the right side of the row.
+              // Green here (vs the amber badge) maps to "active /
+              // attention needed" — same hue family as the connection
+              // status dot, so it doesn't compete with signal-amber for
+              // the design system's accent role.
+              const hasUnreadMentions = (conv.unread_mentions_count ?? 0) > 0;
               return (
                 <div
                   key={conv.conversation_id}
@@ -64,6 +72,8 @@ export function ChatSidebarContent({
                     "group flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm cursor-pointer transition-colors hover:bg-accent min-w-0",
                     activeId === conv.conversation_id && "bg-accent",
                     isInvited && "bg-primary/5",
+                    hasUnreadMentions &&
+                      "border-l-2 border-emerald-500 bg-emerald-500/5 pl-2",
                   )}
                   onClick={() =>
                     isInvited
@@ -78,9 +88,7 @@ export function ChatSidebarContent({
                   )}
                   <span
                     className={`flex-1 truncate ${
-                      (conv.unread_mentions_count ?? 0) > 0
-                        ? "font-semibold"
-                        : ""
+                      hasUnreadMentions ? "font-semibold" : ""
                     }`}
                   >
                     {conv.title}
