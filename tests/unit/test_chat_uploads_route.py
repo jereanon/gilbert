@@ -73,6 +73,10 @@ class _FakeWorkspaceProvider:
     def __init__(self, root: Path) -> None:
         self._root = root
         self._files: list[dict[str, Any]] = []
+        # Conversations the ``member_workspace_roots`` stub consults.
+        # Wire this in the fixture so the fake doesn't have to thread
+        # storage through to know what's a shared room.
+        self._convs: dict[str, dict[str, Any]] | None = None
 
     def get_workspace_root(self, user_id: str, conversation_id: str) -> Path:
         d = self._root / "users" / user_id / "conversations" / conversation_id
@@ -93,6 +97,27 @@ class _FakeWorkspaceProvider:
         d = self.get_workspace_root(user_id, conversation_id) / "scratch"
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    async def member_workspace_roots(
+        self,
+        caller_user_id: str,
+        conversation_id: str,
+    ) -> list[Path]:
+        # Tests that exercise the shared-room fallback set ``shared``
+        # + ``members`` on the fake conv; mirror the real service's
+        # behaviour by walking members and returning their workspace
+        # roots. The route's auth gate already validated access, so
+        # this stub doesn't re-check.
+        conv = self._convs.get(conversation_id) if self._convs is not None else None
+        if not conv or not conv.get("shared"):
+            return []
+        roots: list[Path] = []
+        for member in conv.get("members", []):
+            other_uid = str(member.get("user_id") or "")
+            if not other_uid or other_uid == caller_user_id:
+                continue
+            roots.append(self.get_workspace_root(other_uid, conversation_id))
+        return roots
 
     async def register_file(self, **kwargs: Any) -> dict[str, Any]:
         return {}
@@ -233,6 +258,11 @@ def app(
     conversations: dict[str, dict[str, Any]],
 ) -> FastAPI:
     storage = _FakeStorageProvider(_FakeStorageBackend(conversations))
+    # The shared-room fallback in the download route queries the
+    # workspace provider's ``member_workspace_roots`` — point the
+    # fake at the same conv map the storage backend sees so the
+    # member walk reflects the test's shared/personal setup.
+    workspace_provider._convs = conversations
     gilbert = _FakeGilbert(storage, workspace_provider)
 
     app = FastAPI()

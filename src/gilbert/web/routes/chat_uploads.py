@@ -308,7 +308,7 @@ async def download_chat_file(
     ``skills.workspace.download`` behavior so old attachments
     persisted before per-conversation workspaces still resolve.
     """
-    storage, workspace_svc = await _authorize_conversation(
+    _, workspace_svc = await _authorize_conversation(
         request, conversation_id, user
     )
 
@@ -321,12 +321,13 @@ async def download_chat_file(
 
     safe_name = _sanitize_filename(path)
 
-    # Build the list of workspace roots we'll search + accept for the
-    # path-escape check below. Order matters: caller's own workspace
-    # is searched first (cheap, the common case), then the per-user
-    # legacy paths, then the other-member fallback for shared rooms.
+    # Caller's own workspace is searched first (cheap, the common
+    # case), then the per-user legacy paths kept for attachments
+    # persisted before the workspace refactor. ``accepted_roots``
+    # doubles as the allowlist for the resolve-and-check below —
+    # every candidate must be inside one of these even if symlinks
+    # would otherwise let it escape.
     own_root = workspace_svc.get_workspace_root(user.user_id, conversation_id)
-    own_upload = own_root / "uploads"
     legacy_conv = (
         Path(".gilbert/skill-workspaces/users")
         / user.user_id
@@ -338,35 +339,23 @@ async def download_chat_file(
         Path(".gilbert/skill-workspaces") / user.user_id / "chat-uploads"
     )
     accepted_roots: list[Path] = [own_root, legacy_conv, legacy_user]
-
     candidates: list[Path] = [
-        own_upload / safe_name,
+        own_root / "uploads" / safe_name,
         legacy_conv / safe_name,
         legacy_user / safe_name,
     ]
 
-    # Shared-room fallback: walk other members' workspaces for the
-    # same relative filename. Uploads currently land under the
-    # uploader's per-user path, so a member opening someone else's
-    # attachment would otherwise 404 even though the conv access is
-    # fine. ``_authorize_conversation`` already validated the caller
-    # can see this conversation, so widening the search within the
-    # conv doesn't widen access.
-    backend = storage.backend
-    try:
-        conv_data = await backend.get(
-            _CONVERSATIONS_COLLECTION, conversation_id
-        )
-    except Exception:
-        conv_data = None
-    if conv_data and conv_data.get("shared"):
-        for member in conv_data.get("members", []):
-            other_uid = str(member.get("user_id") or "")
-            if not other_uid or other_uid == user.user_id:
-                continue
-            other_root = workspace_svc.get_workspace_root(other_uid, conversation_id)
-            accepted_roots.append(other_root)
-            candidates.append(other_root / "uploads" / safe_name)
+    # Shared-room fallback — delegated to ``WorkspaceService.member_workspace_roots``
+    # so the access-gating + member-walk lives in one place (the WS
+    # RPC ``_ws_workspace_download`` calls the same helper). Returns
+    # ``[]`` for personal conversations, leaving the candidate set
+    # unchanged for the common case.
+    member_roots = await workspace_svc.member_workspace_roots(
+        user.user_id, conversation_id
+    )
+    for other_root in member_roots:
+        accepted_roots.append(other_root)
+        candidates.append(other_root / "uploads" / safe_name)
 
     full: Path | None = None
     for candidate in candidates:
