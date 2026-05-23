@@ -1051,8 +1051,28 @@ class PhoneCallService(Service):
                 record.failure_reason = "stt_open_failed"
                 return
 
+            # Local-VAD callback that the pump invokes when sustained
+            # energy is detected on the inbound stream. If we're
+            # currently speaking, cancel the TTS playback and drop
+            # whatever Telnyx has buffered for us. The brain's
+            # speech-cancelled / clear path is idempotent so it's
+            # safe to invoke multiple times within a single utterance.
+            def _on_local_vad_speech() -> None:
+                if not speaking.active:
+                    return
+                speaking.cancelled = True
+                # Use create_task because the callback runs from the
+                # synchronous body of _pump_audio_to_stt and we need
+                # to fire-and-forget the ws.send_text in audio_out.clear.
+                asyncio.create_task(session.audio_out.clear())
+                log.info("local VAD: barge-in cancelling in-flight TTS")
+
             pump_task = asyncio.create_task(
-                _pump_audio_to_stt(session.audio_in, stt_stream)
+                _pump_audio_to_stt(
+                    session.audio_in,
+                    stt_stream,
+                    on_speech_detected=_on_local_vad_speech,
+                )
             )
             try:
                 last_final_at: float | None = None
@@ -1708,20 +1728,78 @@ class _MonotonicClock:
 async def _pump_audio_to_stt(
     audio_in: Any,
     stream: Any,
+    on_speech_detected: Any = None,
 ) -> None:
     """Read mulaw-8k chunks from the carrier and feed PCM-16 to the
     transcriber. Decodes per-chunk so latency stays at the chunk
     boundary instead of buffering.
 
+    Also runs a tiny local VAD on the PCM stream and calls
+    ``on_speech_detected()`` when sustained-energy speech is
+    detected. This is our fallback barge-in signal because Scribe
+    Realtime's server-side VAD only emits ``partial_transcript`` /
+    ``committed_transcript`` after the user pauses — useless during
+    a continuous user-and-Gilbert overlap where the user keeps
+    talking right through Gilbert's TTS.
+
     ``audioop.ulaw2lin`` is deprecated in 3.13 but still functional.
     Replace with ``soxr`` or a vendored C helper if it gets removed.
     """
     pump_count = 0
+    # Local VAD state — rolling RMS over the last N=10 chunks (200ms
+    # at 50fps). Threshold tuned for an 8 kHz mulaw → 16-bit PCM
+    # stream: silence RMS sits around 0-200, normal phone speech is
+    # 1500-6000. 800 is conservative — high enough to ignore line
+    # noise / breath / fans, low enough to catch a quiet "stop."
+    _VAD_RMS_THRESHOLD = 800
+    _VAD_WINDOW_FRAMES = 10
+    rms_window: list[int] = []
+    # Once we've fired the callback for one barge-in window, suppress
+    # further fires for this many frames so we don't spam it during
+    # a single user utterance. ~1s gap before we'd consider firing
+    # again (which only matters if the brain didn't actually
+    # cancel — the callback itself is idempotent, this is just for
+    # log hygiene).
+    suppress_until = 0
     try:
         async for chunk in audio_in:
             pcm = audioop.ulaw2lin(chunk, 2)  # 8-bit µ-law → 16-bit PCM
             await stream.send(pcm)
             pump_count += 1
+
+            # Local VAD: track rolling RMS and fire the callback when
+            # sustained energy crosses the threshold. ``audioop.rms``
+            # is a single C call so this stays cheap.
+            try:
+                rms = audioop.rms(pcm, 2)
+            except Exception:
+                rms = 0
+            rms_window.append(rms)
+            if len(rms_window) > _VAD_WINDOW_FRAMES:
+                rms_window.pop(0)
+            if (
+                on_speech_detected is not None
+                and pump_count > suppress_until
+                and len(rms_window) >= _VAD_WINDOW_FRAMES
+                # Most of the window must be above threshold (>= 70%)
+                # — single-frame spikes are usually just clicks.
+                and sum(1 for r in rms_window if r > _VAD_RMS_THRESHOLD)
+                >= int(_VAD_WINDOW_FRAMES * 0.7)
+            ):
+                avg_rms = sum(rms_window) // len(rms_window)
+                logger.info(
+                    "local VAD: speech detected (avg_rms=%d over last %d frames)",
+                    avg_rms,
+                    _VAD_WINDOW_FRAMES,
+                )
+                try:
+                    on_speech_detected()
+                except Exception:
+                    logger.debug("on_speech_detected raised", exc_info=True)
+                # Suppress for ~1s so a continuous utterance doesn't
+                # log a new VAD event every chunk.
+                suppress_until = pump_count + 50
+
             # Heartbeat: ~1/sec at the 50fps inbound cadence. Lets us
             # tell at a glance whether the pump is keeping up with
             # ingest during a TTS burst (if pump count falls behind
