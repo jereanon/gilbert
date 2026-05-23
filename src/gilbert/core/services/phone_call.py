@@ -835,12 +835,34 @@ class PhoneCallService(Service):
             )
 
         # ── status loop: drains backend events, terminates the call ───
+        #
+        # Also fires the FIRST ``think_and_speak`` once the call reaches
+        # CONNECTED. Without this the brain would sit silent on every
+        # call because the previous design only triggered speaking from
+        # the listen loop's FinalTranscript handler — i.e. the remote
+        # had to talk first, which they won't until WE introduce
+        # ourselves. The opener is the disclosure line + whatever the
+        # LLM extracts from the brief.
+
+        already_spoke = False
+
+        async def _maybe_open_with_disclosure() -> None:
+            nonlocal already_spoke
+            if already_spoke:
+                return
+            already_spoke = True
+            await _think_and_speak()
 
         async def _status_loop() -> None:
             try:
                 async for event in session.events:
                     if isinstance(event, CallStatusEvent):
                         await _set_status(event.status, event.reason)
+                        if event.status is CallStatus.CONNECTED:
+                            # Kick off the greeting in a task so the
+                            # status loop keeps draining events
+                            # (including a remote hangup mid-greeting).
+                            asyncio.create_task(_maybe_open_with_disclosure())
                         if event.status in (CallStatus.HUNG_UP, CallStatus.FAILED):
                             stop.set()
                             return
