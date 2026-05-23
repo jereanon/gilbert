@@ -906,7 +906,14 @@ class PhoneCallService(Service):
 
         async def _set_status(new: CallStatus, reason: str = "") -> None:
             if record.status == new.value:
+                log.info("status unchanged: already %s", new.value)
                 return
+            log.info(
+                "status transition: %s → %s (reason=%r)",
+                record.status,
+                new.value,
+                reason,
+            )
             record.status = new.value
             if reason:
                 record.failure_reason = reason
@@ -941,8 +948,10 @@ class PhoneCallService(Service):
             await _think_and_speak()
 
         async def _status_loop() -> None:
+            log.info("status_loop: starting")
             try:
                 async for event in session.events:
+                    log.info("status_loop: received event %s", type(event).__name__)
                     if isinstance(event, CallStatusEvent):
                         await _set_status(event.status, event.reason)
                         if event.status is CallStatus.CONNECTED:
@@ -951,12 +960,17 @@ class PhoneCallService(Service):
                             # (including a remote hangup mid-greeting).
                             asyncio.create_task(_maybe_open_with_disclosure())
                         if event.status in (CallStatus.HUNG_UP, CallStatus.FAILED):
+                            log.info(
+                                "status_loop: terminal status %s — setting stop",
+                                event.status.value,
+                            )
                             stop.set()
                             return
                     elif isinstance(event, DtmfEvent):
                         await _record_turn("them", f"(DTMF pressed: {event.digit})")
                     elif isinstance(event, CallErrorEvent):
                         log.warning("Call stream error: %s", event.message)
+                log.info("status_loop: events iterator exhausted (closed)")
             except Exception:
                 log.exception("status loop crashed")
                 stop.set()
@@ -1224,14 +1238,20 @@ class PhoneCallService(Service):
 
         # ── orchestrate the three loops ────────────────────────────────
 
+        log.info("_run_call: entering gather of status/listen/watchdog loops")
         try:
-            await asyncio.gather(
+            results = await asyncio.gather(
                 _status_loop(),
                 _listen_loop(),
                 _watchdog(),
                 return_exceptions=True,
             )
+            log.info(
+                "_run_call: gather returned — results=%s",
+                [type(r).__name__ if isinstance(r, BaseException) else "ok" for r in results],
+            )
         finally:
+            log.info("_run_call: entering finally cleanup (status before=%s)", record.status)
             # Always tell the carrier to terminate. If the brain exited
             # cleanly through the remote-hangup path the backend's
             # hang_up is already a no-op; if we exited because of an
