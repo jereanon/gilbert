@@ -113,9 +113,13 @@ async def telnyx_media(ws: WebSocket) -> None:
       {"event": "media", "stream_id": "...", "media": {"payload": "<base64>"}}
       {"event": "clear", "stream_id": "..."}
 
-    On connect we authenticate by reading the ``start`` frame's
-    ``custom_parameters`` for the ``token`` we stamped at call-place
-    time. Anything that doesn't match a live session is dropped.
+    On connect we authenticate by matching the start frame's
+    ``call_control_id`` against our active-session registry. The
+    optional ``custom_parameters.token`` we used to look for is only
+    populated when ``stream_custom_parameters`` is set on place_call;
+    Telnyx always includes ``call_control_id`` natively, so we lean
+    on that as the primary identifier and treat the token as a
+    secondary check.
     """
     await ws.accept()
     plugin = _import_plugin()
@@ -134,18 +138,26 @@ async def telnyx_media(ws: WebSocket) -> None:
             return
 
         start = first.get("start", {}) or {}
+        cc_id = str(start.get("call_control_id") or "")
         params = start.get("custom_parameters") or {}
         token = str(params.get("token") or "")
         call_id = str(params.get("call_id") or "")
-        session = (
-            plugin.find_session_by_token(token)
-            if token
-            else plugin.find_session_by_gilbert_id(call_id)
-        )
+
+        # Primary lookup: Telnyx's ``call_control_id`` is in every
+        # start frame — match it against our sidecar map. Fall back to
+        # the token / gilbert call_id from custom_parameters when set.
+        session = None
+        if cc_id:
+            session = plugin.find_session_by_call_control_id(cc_id)
+        if session is None and token:
+            session = plugin.find_session_by_token(token)
+        if session is None and call_id:
+            session = plugin.find_session_by_gilbert_id(call_id)
         if session is None:
             logger.warning(
-                "Telnyx media WS connected for unknown call (token=%r, "
-                "call_id=%r) — dropping",
+                "Telnyx media WS connected for unknown call "
+                "(call_control_id=%r token=%r call_id=%r) — dropping",
+                cc_id,
                 token,
                 call_id,
             )
