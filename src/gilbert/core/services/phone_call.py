@@ -901,8 +901,12 @@ class PhoneCallService(Service):
 
         async def _listen_loop() -> None:
             if self._transcription is None:
-                log.warning("Transcription unavailable — terminating call")
-                stop.set()
+                # Degrade gracefully — call continues, brain speaks the
+                # opening + brief but won't get any responses back.
+                # Useful for voicemail / leave-a-message flows where
+                # transcription isn't strictly necessary.
+                log.warning("Transcription unavailable — call continues TTS-only")
+                record.outcome["transcription_available"] = False
                 return
             try:
                 # Wrap mulaw-8k inbound bytes into PCM s16le-8k stream
@@ -919,12 +923,15 @@ class PhoneCallService(Service):
                     )
                 )
             except Exception:
-                # No STT = no conversation. Don't leave the call dangling
-                # for 15 minutes waiting on the watchdog; tear it down
-                # immediately so the user can retry.
-                log.exception("Failed to open transcription stream — terminating call")
-                record.failure_reason = "transcription_unavailable"
-                stop.set()
+                # STT couldn't open. Don't terminate the call — the
+                # opening disclosure from the brain's CONNECTED handler
+                # already went out, and the user might still want to
+                # talk AT the remote even without transcription. The
+                # call ends when the remote hangs up or the watchdog
+                # fires.
+                log.exception("Failed to open transcription stream — call continues TTS-only")
+                record.outcome["transcription_available"] = False
+                record.failure_reason = "stt_open_failed"
                 return
 
             pump_task = asyncio.create_task(
@@ -957,12 +964,12 @@ class PhoneCallService(Service):
                         # status loop, not this single end.
                         _ = last_final_at  # keep for future heuristics
             except Exception:
-                # Mid-call STT crash kills the call — leaving the brain
-                # to run silently for 15 minutes on the watchdog is worse
-                # than just hanging up and surfacing the failure.
-                log.exception("listen loop crashed — terminating call")
-                record.failure_reason = "stt_stream_crashed"
-                stop.set()
+                # Mid-call STT crash: log + degrade. Don't terminate the
+                # call — opening greeting / brief execution may still be
+                # in flight via TTS, and forcing a hangup wastes that.
+                # The remote-hangup path or the watchdog will clean up.
+                log.exception("listen loop crashed — call continues TTS-only")
+                record.outcome["transcription_failed_midcall"] = True
             finally:
                 pump_task.cancel()
                 try:
@@ -1025,9 +1032,13 @@ class PhoneCallService(Service):
             # Synthesize and write to the carrier. ``MULAW_8000`` lets
             # ElevenLabs hand back carrier-ready bytes — no resample.
             try:
+                # ``voice_id=""`` tells the TTS service to use its
+                # configured default voice (set in /settings under TTS).
+                # All other callers follow this pattern.
                 synth = await self._tts.synthesize(
                     SynthesisRequest(
                         text=text,
+                        voice_id="",
                         output_format=TTSAudioFormat.MULAW_8000,
                     )
                 )
