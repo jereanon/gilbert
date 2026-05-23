@@ -325,7 +325,7 @@ class FeedBriefingService(Service):
 
             # Check if user was already briefed today.
             state = await self._get_state(user_id)
-            today = datetime.now(UTC).strftime("%Y-%m-%d")
+            today = self._today_str()
             if state.get("last_briefed_on") == today:
                 return None
 
@@ -400,7 +400,7 @@ class FeedBriefingService(Service):
             await self._fire_system_briefing(feeds_svc)
 
         users = await self._enumerate_users(feeds_svc)
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        today = self._today_str()
         for user_id, owns_feed in users.items():
             opt_in = await self._is_opted_in(user_id, owns_feed)
             if not opt_in:
@@ -526,6 +526,15 @@ class FeedBriefingService(Service):
             and target_roles & set(getattr(u, "roles", []) or [])
         ]
 
+    def _today_str(self) -> str:
+        """Get today's date string in the configured timezone."""
+        try:
+            from zoneinfo import ZoneInfo
+
+            return datetime.now(ZoneInfo(self._timezone)).strftime("%Y-%m-%d")
+        except Exception:
+            return datetime.now(UTC).strftime("%Y-%m-%d")
+
     async def _get_state(self, user_id: str) -> dict[str, Any]:
         if self._storage is None:
             return {}
@@ -562,7 +571,7 @@ class FeedBriefingService(Service):
         if not isinstance(feeds_svc, FeedsProvider):
             return 0
         users = await self._enumerate_users(feeds_svc)
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        today = self._today_str()
         fired = 0
         for user_id, owns_feed in users.items():
             if not force and not await self._is_opted_in(user_id, owns_feed):
