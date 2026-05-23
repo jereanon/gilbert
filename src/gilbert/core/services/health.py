@@ -298,7 +298,7 @@ class HealthService(Service):
         self._resolver: ServiceResolver | None = None
 
         self._backends: dict[str, HealthBackend] = {}
-        self._enabled: bool = True
+        self._enabled: bool = False
 
         # Tunables (recomputed in on_config_changed).
         self._debug_log_values: bool = False
@@ -950,7 +950,7 @@ class HealthService(Service):
         return params
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
-        self._enabled = bool(config.get("enabled", self._enabled))
+        self._enabled = bool(config.get("enabled", False))
         self._daily_summary_local_hour = int(
             config.get("daily_summary_local_hour", self._daily_summary_local_hour)
         )

@@ -135,7 +135,7 @@ class UserMemoryService(Service):
     """
 
     def __init__(self) -> None:
-        self._enabled: bool = True
+        self._enabled: bool = False
         self._ai_profile: str = "standard"
         self._synthesis_prompt: str = _DEFAULT_SYNTHESIS_PROMPT
         self._min_user_turns: int = 4
@@ -401,7 +401,7 @@ class UserMemoryService(Service):
             )
 
     def _apply_config(self, section: dict[str, Any]) -> None:
-        self._enabled = bool(section.get("enabled", True))
+        self._enabled = bool(section.get("enabled", False))
         self._ai_profile = str(section.get("ai_profile", "standard"))
         prompt = section.get("synthesis_prompt", "") or ""
         self._synthesis_prompt = prompt or _DEFAULT_SYNTHESIS_PROMPT

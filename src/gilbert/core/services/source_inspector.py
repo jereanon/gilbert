@@ -135,7 +135,7 @@ class SourceInspectorService(Service):
     Capabilities: ``source_inspector``, ``ai_tools``.
     """
 
-    _DEFAULT_ENABLED = True
+    _DEFAULT_ENABLED = False
 
     def __init__(self, repo_root: Path | None = None) -> None:
         # ``repo_root`` is normally None — resolved at start() from cwd.

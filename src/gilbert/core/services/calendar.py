@@ -132,7 +132,7 @@ class CalendarService(Service):
         self._cached_accounts: list[CalendarAccount] = []
 
         # Service-level config (defaults match config_params).
-        self._enabled: bool = True
+        self._enabled: bool = False
         self._default_lookahead_days: int = 14
         self._cache_back_hours: int = 2
         self._upcoming_announce_minutes: int = 15
@@ -464,7 +464,7 @@ class CalendarService(Service):
         ]
 
     def _apply_config(self, section: dict[str, Any]) -> None:
-        self._enabled = bool(section.get("enabled", True))
+        self._enabled = bool(section.get("enabled", False))
         self._default_lookahead_days = int(section.get("default_event_lookahead_days", 14) or 14)
         self._cache_back_hours = int(section.get("cache_back_hours", 2) or 2)
         self._upcoming_announce_minutes = int(section.get("upcoming_announce_minutes", 15) or 15)

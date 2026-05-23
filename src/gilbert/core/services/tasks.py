@@ -228,7 +228,7 @@ class TasksService(Service):
         self._runtimes: dict[str, _ListRuntime] = {}
         self._cached_lists: list[TaskList] = []
 
-        self._enabled: bool = True
+        self._enabled: bool = False
         self._max_summary_tasks: int = 30
         self._default_poll_interval_sec: int = 300
         self._due_soon_lookahead_minutes: int = 10
@@ -651,7 +651,7 @@ class TasksService(Service):
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
-        self._enabled = bool(config.get("enabled", self._enabled))
+        self._enabled = bool(config.get("enabled", False))
         self._max_summary_tasks = int(
             config.get("max_summary_tasks", self._max_summary_tasks)
         )

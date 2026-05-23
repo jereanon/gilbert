@@ -346,7 +346,7 @@ class FeedsService(Service):
         self._poll_locks: dict[str, asyncio.Lock] = {}
 
         # Service-wide config.
-        self._enabled: bool = True
+        self._enabled: bool = False
         self._max_items_per_poll: int = 100
         self._max_summary_length: int = 4000
         self._default_poll_interval_sec: int = 1800
@@ -646,7 +646,7 @@ class FeedsService(Service):
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
-        self._enabled = bool(config.get("enabled", self._enabled))
+        self._enabled = bool(config.get("enabled", False))
         self._max_items_per_poll = int(
             config.get("max_items_per_poll", self._max_items_per_poll) or 100
         )
