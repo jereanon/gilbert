@@ -233,6 +233,10 @@ class Gilbert:
 
         self.service_manager.register(DoorbellService())
 
+        from gilbert.core.services.camera import CameraEventService
+
+        self.service_manager.register(CameraEventService())
+
         from gilbert.core.services.screens import ScreenService
 
         self.service_manager.register(ScreenService())
