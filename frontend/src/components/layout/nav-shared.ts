@@ -21,6 +21,7 @@ import {
   RotateCcwIcon,
   TerminalIcon,
   BarChart3Icon,
+  RssIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -48,6 +49,7 @@ const ICONS: Record<string, LucideIcon> = {
   "rotate-ccw": RotateCcwIcon,
   "terminal": TerminalIcon,
   "bar-chart": BarChart3Icon,
+  "rss": RssIcon,
 };
 
 export function groupIconFor(name: string): LucideIcon | undefined {
@@ -58,6 +60,7 @@ export function groupIconFor(name: string): LucideIcon | undefined {
 export const GROUP_COLORS: Record<string, string> = {
   chat: "text-blue-500",
   inbox: "text-emerald-500",
+  feeds: "text-orange-500",
   knowledge: "text-amber-500",
   media: "text-rose-500",
   mcp: "text-pink-500",
@@ -69,6 +72,7 @@ export const GROUP_COLORS: Record<string, string> = {
 export const GROUP_ACCENT_BG: Record<string, string> = {
   chat: "bg-blue-500",
   inbox: "bg-emerald-500",
+  feeds: "bg-orange-500",
   knowledge: "bg-amber-500",
   media: "bg-rose-500",
   mcp: "bg-pink-500",
