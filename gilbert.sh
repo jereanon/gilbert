@@ -454,7 +454,30 @@ run_gilbert_supervised() {
                 echo "Gilbert terminated (SIGTERM) — not restarting."
                 break
                 ;;
+            120)
+                # Uvicorn's exit code when graceful shutdown completes
+                # with leftover async tasks (CancelledError propagating
+                # out of the loop). Semantically a clean SIGTERM stop —
+                # the previous Python process did exit promptly. The
+                # only thing that made restarts feel slow was this
+                # branch falling through to the crash path and sleeping
+                # 20 seconds. Treat 120 as ``stopped by signal``.
+                echo "Gilbert exited via uvicorn-graceful-shutdown (code 120) — not restarting."
+                break
+                ;;
             *)
+                # If we got a SIGTERM/SIGINT while Gilbert was running,
+                # ``SUPERVISOR_STOP`` is already true even if Gilbert
+                # exited with some odd code (asyncio cleanup quirks
+                # can leak a non-zero out). Honor the stop instead of
+                # spinning a crash-restart loop the user just asked
+                # us not to enter. Checked FIRST so a routine
+                # ``systemctl restart`` skips both the LKG rollback
+                # check and the 20-second crash-restart sleep.
+                if [ "$SUPERVISOR_STOP" = "true" ]; then
+                    echo "Gilbert exited with code $exit_code during shutdown — not restarting."
+                    break
+                fi
                 # Crash path. First check whether this is a "broken
                 # switch" inside the post-switch probe window — if so,
                 # roll back to LKG immediately rather than burning
