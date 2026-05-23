@@ -1247,7 +1247,16 @@ class PhoneCallService(Service):
                 chunk_size = 160
                 chunks_written = 0
                 for i in range(0, len(synth.audio), chunk_size):
-                    if speaking.cancelled or generation != speaking.generation:
+                    # Bail conditions, checked once per 20ms frame:
+                    # - barge-in / supersede signal from the listen loop
+                    # - the call itself is ending (was wasting up to
+                    #   12s of TTS into a dead WS on the last test
+                    #   because nothing here noticed the hangup)
+                    if (
+                        speaking.cancelled
+                        or generation != speaking.generation
+                        or stop.is_set()
+                    ):
                         break
                     await session.audio_out.write(synth.audio[i : i + chunk_size])
                     chunks_written += 1
@@ -1707,10 +1716,22 @@ async def _pump_audio_to_stt(
     ``audioop.ulaw2lin`` is deprecated in 3.13 but still functional.
     Replace with ``soxr`` or a vendored C helper if it gets removed.
     """
+    pump_count = 0
     try:
         async for chunk in audio_in:
             pcm = audioop.ulaw2lin(chunk, 2)  # 8-bit µ-law → 16-bit PCM
             await stream.send(pcm)
+            pump_count += 1
+            # Heartbeat: ~1/sec at the 50fps inbound cadence. Lets us
+            # tell at a glance whether the pump is keeping up with
+            # ingest during a TTS burst (if pump count falls behind
+            # the WS-route inbound count, we have a starvation
+            # problem and Scribe never sees the user's audio).
+            if pump_count % 50 == 0:
+                logger.info(
+                    "audio pump → Scribe: chunks_forwarded=%d",
+                    pump_count,
+                )
     except Exception:
         logger.debug("audio pump ended", exc_info=True)
 
