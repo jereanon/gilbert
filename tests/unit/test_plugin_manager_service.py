@@ -111,6 +111,9 @@ class _FakeGilbert:
                 return self._loaded.pop(i)
         return None
 
+    def list_discovered_manifests(self) -> list[Any]:
+        return []
+
 
 # ── Plugin source helpers ────────────────────────────────────────────
 
@@ -361,7 +364,7 @@ class TestListInstalled:
         _patch_loader_to_use_local_source(svc, source)
         await svc.install(gilbert, "https://example.com/x.zip")
 
-        rows = svc.list_installed(gilbert)
+        rows = await svc.list_installed(gilbert)
         names = [r["name"] for r in rows]
         assert "listed-plugin" in names
         row = next(r for r in rows if r["name"] == "listed-plugin")
@@ -403,7 +406,7 @@ class TestListInstalled:
         )
         gilbert.config.plugins.directories = [str(std_dir), str(svc._install_dir)]
 
-        rows = svc.list_installed(gilbert)
+        rows = await svc.list_installed(gilbert)
         row = next(r for r in rows if r["name"] == "boot-plugin")
         assert row["source"] == "std"
         assert row["uninstallable"] is False

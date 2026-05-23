@@ -48,7 +48,7 @@ import type {
 } from "@/types/config";
 import type { Job } from "@/types/scheduler";
 import type { SlashCommand } from "@/types/slash";
-import type { InstalledPlugin, InstallPluginResponse } from "@/types/plugins";
+import type { InstalledPlugin, InstallPluginResponse, SetEnabledResult } from "@/types/plugins";
 import type {
   McpResourceContent,
   McpResourceSpec,
@@ -1061,6 +1061,9 @@ export function useWsApi() {
       rpc<{ status: string; pending_plugins: string[] }>({
         type: "plugins.restart_host",
       }),
+
+    setPluginEnabled: (name: string, enabled: boolean) =>
+      rpc<SetEnabledResult>({ type: "plugins.set_enabled", name, enabled }),
 
     // ── Usage reporting ───────────────────────────────────────────
 

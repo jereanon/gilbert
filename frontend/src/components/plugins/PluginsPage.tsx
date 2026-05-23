@@ -69,7 +69,7 @@ export function PluginsPage() {
       <PageHeader
         eyebrow="EXTENSIONS"
         title="Plugins"
-        description={`${sorted.length} installed.`}
+        description={`${sorted.length} plugins discovered.`}
       />
       <div className="mx-auto max-w-4xl px-4 py-4 sm:px-6 sm:py-6 space-y-3">
         {isLoading && <LoadingSpinner text="Loading plugins..." className="p-4" />}
@@ -130,7 +130,7 @@ export function PluginsPage() {
       <div className="space-y-3">
         {sorted.length === 0 && (
           <div className="text-sm text-muted-foreground text-center py-8">
-            No plugins installed yet.
+            No plugins discovered yet.
           </div>
         )}
         {sorted.map((p) => (
@@ -142,6 +142,16 @@ export function PluginsPage() {
               uninstallMutation.isPending &&
               uninstallMutation.variables === p.name
             }
+            onSetEnabled={async (enabled) => {
+              await api.setPluginEnabled(p.name, enabled);
+              // Optimistically update the local cache so the toggle reflects
+              // the new state without a full refetch.
+              queryClient.setQueryData<typeof plugins>(["plugins"], (old) =>
+                old?.map((plugin) =>
+                  plugin.name === p.name ? { ...plugin, enabled } : plugin,
+                ),
+              );
+            }}
           />
         ))}
       </div>

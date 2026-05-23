@@ -500,6 +500,15 @@ class Gilbert:
         """Return all plugins currently loaded into the app (boot-time + runtime)."""
         return list(self._plugins)
 
+    def list_discovered_manifests(self) -> list[PluginManifest]:
+        """Return all plugin manifests found on disk during startup scanning.
+
+        This includes plugins that were disabled and therefore never had
+        ``setup()`` called — useful for presenting the full list of
+        available plugins in the UI even when some are disabled.
+        """
+        return list(getattr(self, "_discovered_manifests", []))
+
     def find_loaded_plugin(self, name: str) -> LoadedPlugin | None:
         """Look up a loaded plugin by name."""
         for entry in self._plugins:
@@ -553,6 +562,85 @@ class Gilbert:
                 return self._plugins.pop(i)
         return None
 
+    async def _get_storage_backend(self) -> StorageBackend | None:
+        """Return the raw storage backend if it is available.
+
+        Storage is registered in step 2 of ``start()``, before plugins
+        load in step 10, so this is safe to call from ``_load_plugins``.
+        """
+        storage_svc = self.service_manager.list_services().get("storage")
+        if storage_svc is not None and isinstance(storage_svc, StorageProvider):
+            return storage_svc.raw_backend
+        return None
+
+    async def _check_plugin_enabled(
+        self,
+        storage: StorageBackend | None,
+        name: str,
+    ) -> bool:
+        """Return True if this plugin should have ``setup()`` called.
+
+        Reads the ``gilbert.plugin_state`` collection for a row keyed by
+        ``name``.  Decision table:
+
+        - Row exists with ``enabled=True``  → load (return True)
+        - Row exists with ``enabled=False`` → skip (return False)
+        - Row absent (first time seen)       → create row with
+          ``enabled=False``, ``first_seen_at=now``, then skip
+
+        When storage is unavailable the method returns True so that a
+        fresh install (no DB yet) loads all plugins normally.
+        """
+        if storage is None:
+            return True
+        from datetime import UTC, datetime
+
+        _STATE_COLLECTION = "gilbert.plugin_state"
+        try:
+            row = await storage.get(_STATE_COLLECTION, name)
+        except Exception:
+            logger.exception(
+                "Failed to read plugin state for %s — defaulting to enabled",
+                name,
+            )
+            return True
+
+        if row is not None:
+            enabled = bool(row.get("enabled", False))
+            logger.debug(
+                "Plugin %s: state row found, enabled=%s",
+                name,
+                enabled,
+            )
+            return enabled
+
+        # No row yet — first time we've seen this plugin.
+        now = datetime.now(UTC).isoformat()
+        try:
+            await storage.put(
+                _STATE_COLLECTION,
+                name,
+                {
+                    "_id": name,
+                    "name": name,
+                    "enabled": False,
+                    "first_seen_at": now,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Failed to write new plugin state for %s — defaulting to enabled",
+                name,
+            )
+            return True
+
+        logger.info(
+            "New plugin discovered: %s — defaulting to disabled. "
+            "Enable it via the Plugins settings page and restart.",
+            name,
+        )
+        return False
+
     async def _load_plugins(self) -> None:
         """Load plugins from discovered manifests and explicit sources.
 
@@ -566,6 +654,9 @@ class Gilbert:
         plugin's registrations leak into another's attribution.
         """
         loader = PluginLoader(cache_dir=self.config.plugins.cache_dir)
+
+        # Resolve storage once for plugin-state checks.
+        storage = await self._get_storage_backend()
 
         # Phase 1: Load plugins from scanned directories (already discovered)
         manifests: list[PluginManifest] = getattr(self, "_discovered_manifests", [])
@@ -586,9 +677,17 @@ class Gilbert:
             except Exception as exc:  # noqa: BLE001 — propagated below
                 return m, exc
 
-        if sorted_manifests:
+        # Check plugin state *before* importing (to avoid unnecessary work).
+        # This is serial because state reads are cheap and must reflect the
+        # same DB snapshot the serialised setup() loop sees.
+        enabled_manifests: list[PluginManifest] = []
+        for m in sorted_manifests:
+            if await self._check_plugin_enabled(storage, m.name):
+                enabled_manifests.append(m)
+
+        if enabled_manifests:
             import_results = await asyncio.gather(
-                *(_import_manifest(m) for m in sorted_manifests)
+                *(_import_manifest(m) for m in enabled_manifests)
             )
         else:
             import_results = []
@@ -648,6 +747,13 @@ class Gilbert:
                 continue
             try:
                 meta = result.metadata()
+                # Honor plugin_state for explicit sources too.
+                if not await self._check_plugin_enabled(storage, meta.name):
+                    logger.info(
+                        "Plugin %s is disabled — skipping setup (explicit source)",
+                        meta.name,
+                    )
+                    continue
                 before = set(self.service_manager.list_services().keys())
                 context = self.make_plugin_context(meta.name)
                 await result.setup(context)

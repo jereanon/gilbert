@@ -51,6 +51,14 @@ logger = logging.getLogger(__name__)
 # Entity storage collection used for the runtime install registry.
 _INSTALL_COLLECTION = "gilbert.plugin_installs"
 
+# Entity storage collection used for per-plugin enabled/disabled state.
+# Each row is keyed by plugin name and records at minimum:
+#   {"name": ..., "enabled": True|False, "first_seen_at": "<ISO-8601>"}
+# Rows are written on first discovery (enabled=False) and toggled via
+# the ``plugins.set_enabled`` WS RPC.  The boot-time loader reads this
+# collection to decide whether to call ``plugin.setup()``.
+_STATE_COLLECTION = "gilbert.plugin_state"
+
 # Default install directory (relative to working directory). This is one
 # of the three plugin directories scanned at boot — see gilbert.yaml.
 DEFAULT_INSTALL_DIR = Path("installed-plugins")
@@ -74,6 +82,22 @@ class _RuntimeRecord:
     # still persisted so the UI can surface the pending state, and the
     # boot-time loader picks the plugin up normally on the next start.
     needs_restart: bool = False
+
+
+@dataclass
+class PluginStateRecord:
+    """Persisted enabled/disabled state for a discovered plugin.
+
+    Written to ``gilbert.plugin_state`` keyed by ``name``.
+    ``first_seen_at`` is the ISO-8601 timestamp when Gilbert first
+    noticed this plugin on disk.  New plugins default to
+    ``enabled=False``; the migration seeds existing plugins as
+    ``enabled=True`` so pre-upgrade installs keep working.
+    """
+
+    name: str
+    enabled: bool
+    first_seen_at: str
 
 
 class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
@@ -220,6 +244,72 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
             await self._storage.delete(_INSTALL_COLLECTION, name)
         except Exception:
             logger.exception("Failed to delete registry row: %s", name)
+
+    # --- Plugin state helpers (enabled/disabled) ---
+
+    async def get_plugin_state(self, name: str) -> PluginStateRecord | None:
+        """Read the enabled/disabled state row for ``name`` from storage.
+
+        Returns ``None`` if storage is unavailable or no row exists yet.
+        """
+        if self._storage is None:
+            return None
+        try:
+            row = await self._storage.get(_STATE_COLLECTION, name)
+        except Exception:
+            logger.exception("Failed to read plugin state for %s", name)
+            return None
+        if row is None:
+            return None
+        return PluginStateRecord(
+            name=str(row.get("name") or name),
+            enabled=bool(row.get("enabled", False)),
+            first_seen_at=str(row.get("first_seen_at") or ""),
+        )
+
+    async def set_plugin_state(self, record: PluginStateRecord) -> None:
+        """Write a plugin state row to storage (upsert by name)."""
+        if self._storage is None:
+            return
+        try:
+            await self._storage.put(
+                _STATE_COLLECTION,
+                record.name,
+                {
+                    "_id": record.name,
+                    "name": record.name,
+                    "enabled": record.enabled,
+                    "first_seen_at": record.first_seen_at,
+                },
+            )
+        except Exception:
+            logger.exception("Failed to persist plugin state for %s", record.name)
+
+    async def ensure_plugin_state(
+        self,
+        name: str,
+        *,
+        default_enabled: bool,
+    ) -> PluginStateRecord:
+        """Return the existing state row for ``name``, or create a new one.
+
+        If no row exists, a row with ``enabled=default_enabled`` and
+        ``first_seen_at`` = now is created and persisted.
+
+        Called from the boot-time loader so it can record newly-discovered
+        plugins (``default_enabled=False``) while leaving existing rows alone.
+        """
+        existing = await self.get_plugin_state(name)
+        if existing is not None:
+            return existing
+        now = datetime.now(UTC).isoformat()
+        record = PluginStateRecord(
+            name=name,
+            enabled=default_enabled,
+            first_seen_at=now,
+        )
+        await self.set_plugin_state(record)
+        return record
 
     # --- Public install / uninstall API ---
 
@@ -411,21 +501,29 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
         self._purge_plugin_modules(name)
         logger.info("Plugin uninstalled: %s", name)
 
-    def list_installed(self, gilbert: Any) -> list[dict[str, Any]]:
-        """Return one row per known plugin (boot-loaded + runtime-installed).
+    async def list_installed(self, gilbert: Any) -> list[dict[str, Any]]:
+        """Return one row per known plugin (boot-loaded + disabled + runtime-installed).
+
+        Includes plugins that are disabled (never had ``setup()`` called)
+        so the UI can present every discoverable plugin and let the user
+        toggle them on/off.
 
         ``source`` buckets by which configured plugin directory the
         install path lives under: ``"std"``, ``"local"``, ``"installed"``,
         or ``"unknown"`` if it doesn't match any.
+
+        ``enabled`` reflects the stored ``gilbert.plugin_state`` value
+        (``True`` = will load on next restart; ``False`` = will not load).
         """
         bucket_dirs = self._resolve_bucket_dirs(gilbert)
         results: list[dict[str, Any]] = []
-        loaded_names: set[str] = set()
+        seen_names: set[str] = set()
 
         for entry in gilbert.list_loaded_plugins():
             meta = entry.plugin.metadata()
-            loaded_names.add(meta.name)
+            seen_names.add(meta.name)
             record = self._records.get(meta.name)
+            state = await self.get_plugin_state(meta.name)
             results.append(
                 {
                     "name": meta.name,
@@ -439,6 +537,7 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
                     "running": True,
                     "uninstallable": meta.name in self._records,
                     "needs_restart": bool(record and record.needs_restart),
+                    "enabled": state.enabled if state is not None else True,
                 }
             )
 
@@ -446,8 +545,10 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
         # boot-time load failed, or a deferred install waiting for restart).
         # Surface them so the user can clean up or restart.
         for name, record in self._records.items():
-            if name in loaded_names:
+            if name in seen_names:
                 continue
+            seen_names.add(name)
+            state = await self.get_plugin_state(name)
             results.append(
                 {
                     "name": record.name,
@@ -461,6 +562,37 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
                     "running": False,
                     "uninstallable": True,
                     "needs_restart": record.needs_restart,
+                    "enabled": state.enabled if state is not None else True,
+                }
+            )
+
+        # Plugins discovered on disk but currently disabled (setup() was not
+        # called, so they won't appear in list_loaded_plugins()).  We surface
+        # them so the user can see and re-enable them.
+        discovered_manifests = (
+            gilbert.list_discovered_manifests()
+            if hasattr(gilbert, "list_discovered_manifests")
+            else []
+        )
+        for manifest in discovered_manifests:
+            if manifest.name in seen_names:
+                continue
+            seen_names.add(manifest.name)
+            state = await self.get_plugin_state(manifest.name)
+            results.append(
+                {
+                    "name": manifest.name,
+                    "version": manifest.version,
+                    "description": manifest.description,
+                    "install_path": str(manifest.path),
+                    "source": _bucket_for(manifest.path, bucket_dirs),
+                    "source_url": None,
+                    "installed_at": None,
+                    "registered_services": [],
+                    "running": False,
+                    "uninstallable": False,
+                    "needs_restart": False,
+                    "enabled": state.enabled if state is not None else False,
                 }
             )
 
@@ -632,7 +764,7 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
                     return json.dumps({"status": "error", "error": str(exc)})
                 return json.dumps({"status": "uninstalled", "name": target})
             case "plugin_list":
-                rows = self.list_installed(gilbert)
+                rows = await self.list_installed(gilbert)
                 return json.dumps({"plugins": rows})
             case "plugin_restart_host":
                 pending = [r.name for r in self._records.values() if r.needs_restart]
@@ -684,6 +816,7 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
             "plugins.install": self._ws_plugins_install,
             "plugins.uninstall": self._ws_plugins_uninstall,
             "plugins.restart_host": self._ws_plugins_restart_host,
+            "plugins.set_enabled": self._ws_plugins_set_enabled,
             "ui.panels.list": self._ws_ui_panels_list,
         }
 
@@ -698,7 +831,7 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
         return {
             "type": "plugins.list.result",
             "ref": frame.get("id"),
-            "plugins": self.list_installed(gilbert),
+            "plugins": await self.list_installed(gilbert),
         }
 
     async def _ws_plugins_install(
@@ -787,6 +920,47 @@ class PluginManagerService(Service, ToolProvider, WsHandlerProvider):
             "status": "uninstalled",
         }
 
+    async def _ws_plugins_set_enabled(
+        self,
+        conn: Any,
+        frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Toggle a plugin's enabled/disabled state.
+
+        Frame: ``{type: "plugins.set_enabled", name: <str>, enabled: <bool>}``
+
+        Updates the ``gilbert.plugin_state`` row.  Because
+        ``plugin.setup()`` only runs at boot, changing this setting
+        always requires a restart to take effect — ``restart_required``
+        is therefore always ``True`` in the response.
+        """
+        name = str(frame.get("name") or "").strip()
+        if not name:
+            return _ws_error(frame, "Missing 'name'")
+        raw_enabled = frame.get("enabled")
+        if not isinstance(raw_enabled, bool):
+            return _ws_error(frame, "'enabled' must be a boolean")
+
+        existing = await self.get_plugin_state(name)
+        now = datetime.now(UTC).isoformat()
+        record = PluginStateRecord(
+            name=name,
+            enabled=raw_enabled,
+            first_seen_at=existing.first_seen_at if existing else now,
+        )
+        await self.set_plugin_state(record)
+        logger.info(
+            "Plugin %s %s via plugins.set_enabled",
+            name,
+            "enabled" if raw_enabled else "disabled",
+        )
+        return {
+            "type": "plugins.set_enabled.result",
+            "ref": frame.get("id"),
+            "name": name,
+            "enabled": raw_enabled,
+            "restart_required": True,
+        }
 
     async def _ws_ui_panels_list(
         self,
