@@ -23,6 +23,9 @@ import {
   BarChart3Icon,
   RssIcon,
   ListTodoIcon,
+  CalendarIcon,
+  HeartPulseIcon,
+  TargetIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -52,6 +55,9 @@ const ICONS: Record<string, LucideIcon> = {
   "bar-chart": BarChart3Icon,
   "rss": RssIcon,
   "list-todo": ListTodoIcon,
+  "calendar": CalendarIcon,
+  "heart-pulse": HeartPulseIcon,
+  "target": TargetIcon,
 };
 
 export function groupIconFor(name: string): LucideIcon | undefined {
@@ -62,9 +68,11 @@ export function groupIconFor(name: string): LucideIcon | undefined {
 export const GROUP_COLORS: Record<string, string> = {
   chat: "text-blue-500",
   inbox: "text-emerald-500",
+  calendar: "text-sky-500",
   feeds: "text-orange-500",
   tasks: "text-teal-500",
   knowledge: "text-amber-500",
+  health: "text-red-500",
   media: "text-rose-500",
   mcp: "text-pink-500",
   security: "text-violet-500",
@@ -75,9 +83,11 @@ export const GROUP_COLORS: Record<string, string> = {
 export const GROUP_ACCENT_BG: Record<string, string> = {
   chat: "bg-blue-500",
   inbox: "bg-emerald-500",
+  calendar: "bg-sky-500",
   feeds: "bg-orange-500",
   tasks: "bg-teal-500",
   knowledge: "bg-amber-500",
+  health: "bg-red-500",
   media: "bg-rose-500",
   mcp: "bg-pink-500",
   security: "bg-violet-500",

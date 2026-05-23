@@ -149,6 +149,8 @@ def _visible_plugin_cards(
                 "icon": r.icon,
                 "required_role": r.required_role,
             }
+            if r.requires_capability:
+                row["requires_capability"] = r.requires_capability
             if visible_fn(row):
                 out.append({k: v for k, v in row.items() if k != "requires_capability"})
     return out
