@@ -455,3 +455,56 @@ class TestFeedsProviderProtocolMethods:
 
     def test_fake_feeds_provider_isinstance(self) -> None:
         assert isinstance(FakeFeedsProvider(), FeedsProvider)
+
+
+class TestGreetingContextProvider:
+    """FeedBriefingService implements GreetingContextProvider."""
+
+    async def test_greeting_context_returns_briefing_text(
+        self, briefing_svc: Any, sqlite_storage: Any
+    ) -> None:
+        from gilbert.interfaces.greeting import GreetingContext
+
+        svc, feeds_provider, bus, storage = briefing_svc
+        feeds_provider.feeds.append(Feed(id="f1", owner_user_id="alice"))
+        ctx = await svc.greeting_context(user_id="alice")
+        assert isinstance(ctx, GreetingContext)
+        assert ctx.provider_id == "briefing"
+        assert ctx.label == "News briefing"
+        assert "briefing for alice" in ctx.prose
+
+    async def test_greeting_context_suppresses_when_already_briefed_today(
+        self, briefing_svc: Any, sqlite_storage: Any
+    ) -> None:
+        """If feed_briefing_state shows the user got a briefing today,
+        return None — don't double-brief."""
+        svc, feeds_provider, bus, storage = briefing_svc
+        feeds_provider.feeds.append(Feed(id="f1", owner_user_id="alice"))
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        await storage.put(
+            _BRIEFING_STATE_COLLECTION,
+            "alice",
+            {
+                "_id": "alice",
+                "last_briefed_on": today,
+                "last_briefing_id": "brief_alice",
+            },
+        )
+        assert await svc.greeting_context(user_id="alice") is None
+
+    async def test_greeting_context_returns_none_when_no_resolver(
+        self, sqlite_storage: Any
+    ) -> None:
+        svc = FeedBriefingService()
+        # Service with no resolver - mimics a scenario where greeting_context
+        # is called but the service was never started.
+        assert await svc.greeting_context(user_id="alice") is None
+
+    def test_feed_briefing_advertises_capability_and_config(
+        self, briefing_svc: Any
+    ) -> None:
+        svc, _, _, _ = briefing_svc
+        info = svc.service_info()
+        assert "greeting_context" in info.capabilities
+        keys = {p.key for p in svc.config_params()}
+        assert "briefing_max_seconds" in keys
