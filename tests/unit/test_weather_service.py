@@ -1523,15 +1523,107 @@ class TestDailyDigest:
 
 class TestGreetingWeatherHintTemplateConfig:
     def test_weather_hint_template_is_ai_prompt(self) -> None:
-        """The greeting service's ``weather_hint_template`` is fed into
-        the AI greeting prompt, so per the "AI Prompts Are Always
-        Configurable" rule it must declare ``ai_prompt=True`` to expose
-        the Author-with-AI affordance to operators.
+        """The ``weather_hint_template`` was moved from GreetingService to
+        WeatherService (Task 2) so it lives with the code that owns the
+        template rendering. Per the "AI Prompts Are Always Configurable"
+        rule it must declare ``ai_prompt=True``.
         """
-        from gilbert.core.services.greeting import GreetingService
-
-        params = GreetingService().config_params()
+        params = WeatherService().config_params()
         by_key = {p.key: p for p in params}
         assert "weather_hint_template" in by_key
         assert by_key["weather_hint_template"].ai_prompt is True
         assert by_key["weather_hint_template"].multiline is True
+
+    def test_greeting_service_no_longer_has_weather_hint_template(self) -> None:
+        """Regression guard: template ownership moved to WeatherService."""
+        from gilbert.core.services.greeting import GreetingService
+
+        keys = {p.key for p in GreetingService().config_params()}
+        assert "weather_hint_template" not in keys
+
+
+# ── GreetingContextProvider capability ────────────────────────────────
+
+
+class TestWeatherGreetingContextProvider:
+    @pytest.mark.asyncio
+    async def test_greeting_context_returns_labeled_blurb(
+        self, sqlite_storage: SQLiteStorage,
+    ) -> None:
+        """WeatherService.greeting_context returns a GreetingContext with the
+        rendered weather_hint_template when current data is available."""
+        from gilbert.interfaces.greeting import GreetingContext
+
+        backend = FakeWeatherBackend()
+        backend.location_to_return = GeoLocation(
+            latitude=41.4993,
+            longitude=-81.6944,
+            name="Cleveland, OH",
+            timezone="America/New_York",
+            country_code="US",
+        )
+        svc, _ = await _build_service(
+            sqlite_storage=sqlite_storage,
+            backend=backend,
+            enabled=True,
+        )
+        try:
+            await svc._save_home_location(_TEST_LOC)
+            ctx = await svc.greeting_context(user_id="alice")
+            assert isinstance(ctx, GreetingContext)
+            assert ctx.provider_id == "weather"
+            assert ctx.label == "Weather"
+            assert "Cleveland" in ctx.prose
+            assert "18" in ctx.prose  # temperature in celsius
+        finally:
+            await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_greeting_context_returns_none_when_unconfigured(
+        self, sqlite_storage: SQLiteStorage,
+    ) -> None:
+        """No location configured → None (greeting proceeds without)."""
+        backend = FakeWeatherBackend()
+        svc, _ = await _build_service(
+            sqlite_storage=sqlite_storage,
+            backend=backend,
+            enabled=True,
+        )
+        try:
+            # No home location saved
+            ctx = await svc.greeting_context(user_id="alice")
+            assert ctx is None
+        finally:
+            await svc.stop()
+
+    @pytest.mark.asyncio
+    async def test_greeting_context_returns_none_on_backend_failure(
+        self, sqlite_storage: SQLiteStorage,
+    ) -> None:
+        """Backend raises → None."""
+        backend = FakeWeatherBackend()
+        backend.fail_with = WeatherUnavailableError("backend down")
+        svc, _ = await _build_service(
+            sqlite_storage=sqlite_storage,
+            backend=backend,
+            enabled=True,
+        )
+        try:
+            await svc._save_home_location(_TEST_LOC)
+            ctx = await svc.greeting_context(user_id="alice")
+            assert ctx is None
+        finally:
+            await svc.stop()
+
+    def test_weather_service_advertises_greeting_context_capability(self) -> None:
+        svc = WeatherService()
+        info = svc.service_info()
+        assert "greeting_context" in info.capabilities
+        assert svc.greeting_context_id == "weather"
+        assert svc.greeting_context_label == "Weather"
+
+    def test_weather_service_has_weather_hint_template_config(self) -> None:
+        """The template was on GreetingService; this task moves it here."""
+        svc = WeatherService()
+        keys = {p.key for p in svc.config_params()}
+        assert "weather_hint_template" in keys

@@ -37,6 +37,7 @@ from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.context import get_current_user
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
 from gilbert.interfaces.feeds import Feed, FeedsProvider
+from gilbert.interfaces.greeting import GreetingContext
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.speaker import SpeakerProvider
 from gilbert.interfaces.storage import StorageProvider
@@ -74,11 +75,12 @@ class FeedBriefingService(Service):
         self._system_briefing_enabled: bool = False
         self._system_briefing_user_id: str = ""
         self._announce_speakers: list[str] = []
+        self._briefing_max_seconds: int = 60
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="feed_briefing",
-            capabilities=frozenset({"feed_briefing", "ws_handlers"}),
+            capabilities=frozenset({"feed_briefing", "ws_handlers", "greeting_context"}),
             requires=frozenset({"feeds", "scheduler"}),
             optional=frozenset(
                 {
@@ -188,6 +190,12 @@ class FeedBriefingService(Service):
                 default=[],
                 choices_from="speakers",
             ),
+            ConfigParam(
+                key="briefing_max_seconds",
+                type=ToolParameterType.INTEGER,
+                description="Soft cap on briefing length (~2.5 words/sec) for the greeting context contribution.",
+                default=60,
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -220,6 +228,9 @@ class FeedBriefingService(Service):
         speakers = config.get("announce_speakers", self._announce_speakers)
         if isinstance(speakers, list):
             self._announce_speakers = [str(s) for s in speakers]
+        self._briefing_max_seconds = int(
+            config.get("briefing_max_seconds", self._briefing_max_seconds) or 60
+        )
 
     async def start(self, resolver: ServiceResolver) -> None:
         self._resolver = resolver
@@ -283,6 +294,90 @@ class FeedBriefingService(Service):
             with contextlib.suppress(Exception):
                 self._scheduler.remove_job("feed-briefing-fallback")
 
+    # ── Greeting Context Provider implementation ──────────────────────
+
+    @property
+    def greeting_context_id(self) -> str:
+        """Stable short id for the greeting context provider."""
+        return "briefing"
+
+    @property
+    def greeting_context_label(self) -> str:
+        """Human-readable label for the settings UI toggle row."""
+        return "News briefing"
+
+    async def greeting_context(self, user_id: str) -> GreetingContext | None:
+        """Return a labeled briefing fact for the user's greeting, or None.
+
+        Returns None if:
+        - The user has already been briefed today (suppression guard).
+        - The feeds capability is missing or unavailable.
+        - The briefing build fails or returns empty text.
+        - Storage backend is unavailable.
+
+        On success, writes the briefing-state record so subsequent calls
+        today return None.
+        """
+        try:
+            # Guard against storage unavailability.
+            if self._storage is None:
+                return None
+
+            # Check if user was already briefed today.
+            state = await self._get_state(user_id)
+            today = self._today_str()
+            if state.get("last_briefed_on") == today:
+                return None
+
+            # Look up the feeds capability.
+            if self._resolver is None:
+                return None
+            feeds_svc = self._resolver.get_capability("feeds")
+            if not isinstance(feeds_svc, FeedsProvider):
+                return None
+
+            # Build the briefing.
+            user_ctx = UserContext(
+                user_id=user_id,
+                email=f"{user_id}@local",
+                display_name=user_id,
+                roles=frozenset({"user"}),
+            )
+            result = await feeds_svc.build_briefing(
+                user_ctx,
+                top_n=3,
+                max_spoken_seconds=self._briefing_max_seconds,
+                mark_briefed=True,
+            )
+
+            # Extract the spoken text.
+            spoken_text = (getattr(result, "spoken", "") or "").strip()
+            if not spoken_text:
+                return None
+
+            # Update the state to mark as briefed today.
+            await self._storage.put(
+                _BRIEFING_STATE_COLLECTION,
+                user_id,
+                {
+                    "_id": user_id,
+                    "last_briefed_on": today,
+                    "last_briefing_id": result.briefing_id,
+                },
+            )
+
+            return GreetingContext(
+                provider_id="briefing",
+                label="News briefing",
+                prose=spoken_text,
+            )
+        except Exception:
+            logger.exception(
+                "greeting_context: failed for user %s",
+                user_id,
+            )
+            return None
+
     async def _fallback_tick(self) -> None:
         """Fire briefings for users who didn't get the presence-driven path.
 
@@ -305,7 +400,7 @@ class FeedBriefingService(Service):
             await self._fire_system_briefing(feeds_svc)
 
         users = await self._enumerate_users(feeds_svc)
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        today = self._today_str()
         for user_id, owns_feed in users.items():
             opt_in = await self._is_opted_in(user_id, owns_feed)
             if not opt_in:
@@ -431,6 +526,15 @@ class FeedBriefingService(Service):
             and target_roles & set(getattr(u, "roles", []) or [])
         ]
 
+    def _today_str(self) -> str:
+        """Get today's date string in the configured timezone."""
+        try:
+            from zoneinfo import ZoneInfo
+
+            return datetime.now(ZoneInfo(self._timezone)).strftime("%Y-%m-%d")
+        except Exception:
+            return datetime.now(UTC).strftime("%Y-%m-%d")
+
     async def _get_state(self, user_id: str) -> dict[str, Any]:
         if self._storage is None:
             return {}
@@ -467,7 +571,7 @@ class FeedBriefingService(Service):
         if not isinstance(feeds_svc, FeedsProvider):
             return 0
         users = await self._enumerate_users(feeds_svc)
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        today = self._today_str()
         fired = 0
         for user_id, owns_feed in users.items():
             if not force and not await self._is_opted_in(user_id, owns_feed):

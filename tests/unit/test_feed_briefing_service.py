@@ -455,3 +455,184 @@ class TestFeedsProviderProtocolMethods:
 
     def test_fake_feeds_provider_isinstance(self) -> None:
         assert isinstance(FakeFeedsProvider(), FeedsProvider)
+
+
+class TestGreetingContextProvider:
+    """FeedBriefingService implements GreetingContextProvider."""
+
+    async def test_greeting_context_returns_briefing_text(
+        self, briefing_svc: Any, sqlite_storage: Any
+    ) -> None:
+        from gilbert.interfaces.greeting import GreetingContext
+
+        svc, feeds_provider, bus, storage = briefing_svc
+        feeds_provider.feeds.append(Feed(id="f1", owner_user_id="alice"))
+        ctx = await svc.greeting_context(user_id="alice")
+        assert isinstance(ctx, GreetingContext)
+        assert ctx.provider_id == "briefing"
+        assert ctx.label == "News briefing"
+        assert "briefing for alice" in ctx.prose
+
+    async def test_greeting_context_respects_configured_timezone(
+        self, sqlite_storage: Any
+    ) -> None:
+        """Verify that the same-day suppression guard uses the configured
+        timezone, not UTC. A user in a timezone east of UTC could get
+        double-briefed near midnight if we hardcoded UTC.
+
+        Test scenario: Times at UTC midnight boundary but same local day.
+        - 2024-01-15 23:00 UTC = 2024-01-15 18:00 EST (local day is 2024-01-15)
+        - 2024-01-16 01:00 UTC = 2024-01-15 20:00 EST (local day is still 2024-01-15)
+        If we use UTC, the dates would be different (15 vs 16).
+        If we use EST, they're the same (both 15), so the second call should be suppressed.
+        """
+
+        feeds_provider = FakeFeedsProvider()
+        feeds_provider.feeds.append(Feed(id="f1", owner_user_id="alice"))
+        storage_provider = FakeStorageProvider(sqlite_storage)
+        sched = FakeScheduler()
+        resolver = FakeResolver(
+            feeds=feeds_provider,
+            scheduler=sched,
+            entity_storage=storage_provider,
+        )
+
+        svc = FeedBriefingService()
+        # Configure with a non-UTC timezone (America/New_York is UTC-5 or UTC-4)
+        await svc.on_config_changed(
+            {
+                "enabled": True,
+                "timezone": "America/New_York",
+            }
+        )
+        await svc.start(resolver)
+
+        try:
+            # Directly test _today_str with mocked datetime.now
+            from unittest.mock import patch
+            from datetime import datetime as real_datetime
+            from zoneinfo import ZoneInfo
+
+            # Verify the behavior: same local day in EST vs different UTC days
+            ny_tz = ZoneInfo("America/New_York")
+
+            # 2024-01-15 23:00 UTC = 2024-01-15 18:00 EST
+            first_utc = real_datetime(2024, 1, 15, 23, 0, 0, tzinfo=UTC)
+            first_local = first_utc.astimezone(ny_tz)
+            first_date_str = first_local.strftime("%Y-%m-%d")
+
+            # 2024-01-16 01:00 UTC = 2024-01-15 20:00 EST (same local day)
+            second_utc = real_datetime(2024, 1, 16, 1, 0, 0, tzinfo=UTC)
+            second_local = second_utc.astimezone(ny_tz)
+            second_date_str = second_local.strftime("%Y-%m-%d")
+
+            # Sanity check: both should map to the same local date
+            assert first_date_str == second_date_str == "2024-01-15", (
+                "Test setup error: dates should be the same in EST"
+            )
+
+            # Now test greeting_context with mocked datetime.now
+            with patch("gilbert.core.services.feed_briefing.datetime") as mock_dt:
+                # Make the mock return our test times when called with a tz
+                def mock_now(tz=None):
+                    if tz is None:
+                        # When called without tz, return first_utc
+                        return first_utc
+                    # When called with tz, convert appropriately
+                    if tz == UTC:
+                        return first_utc
+                    # For ZoneInfo, return the converted time
+                    return first_utc.astimezone(tz)
+
+                mock_dt.now.side_effect = mock_now
+                # Keep side_effect to allow datetime.now() and datetime.now(tz) calls
+                original_datetime = real_datetime
+                mock_dt.side_effect = lambda *args, **kw: original_datetime(
+                    *args, **kw
+                )
+
+                # First greeting_context should return the briefing
+                ctx1 = await svc.greeting_context(user_id="alice")
+                assert ctx1 is not None
+                assert "briefing for alice" in ctx1.prose
+
+                # Now update mock to return second_utc
+                def mock_now_second(tz=None):
+                    if tz is None:
+                        return second_utc
+                    if tz == UTC:
+                        return second_utc
+                    return second_utc.astimezone(tz)
+
+                mock_dt.now.side_effect = mock_now_second
+
+                # Second greeting_context should return None (already briefed today)
+                ctx2 = await svc.greeting_context(user_id="alice")
+                assert ctx2 is None, (
+                    "Expected suppression on same local day; "
+                    "if hardcoded UTC, both times span 2024-01-15/16 boundary"
+                )
+        finally:
+            await svc.stop()
+
+    async def test_greeting_context_suppresses_when_already_briefed_today(
+        self, briefing_svc: Any, sqlite_storage: Any
+    ) -> None:
+        """If feed_briefing_state shows the user got a briefing today,
+        return None — don't double-brief."""
+        svc, feeds_provider, bus, storage = briefing_svc
+        feeds_provider.feeds.append(Feed(id="f1", owner_user_id="alice"))
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        await storage.put(
+            _BRIEFING_STATE_COLLECTION,
+            "alice",
+            {
+                "_id": "alice",
+                "last_briefed_on": today,
+                "last_briefing_id": "brief_alice",
+            },
+        )
+        assert await svc.greeting_context(user_id="alice") is None
+
+    async def test_greeting_context_returns_none_when_no_resolver(
+        self, sqlite_storage: Any
+    ) -> None:
+        svc = FeedBriefingService()
+        # Service with no resolver - mimics a scenario where greeting_context
+        # is called but the service was never started.
+        assert await svc.greeting_context(user_id="alice") is None
+
+    async def test_greeting_context_returns_none_when_no_feeds_capability(
+        self, sqlite_storage: Any
+    ) -> None:
+        """When resolver exists but feeds capability is missing or not a
+        FeedsProvider, greeting_context returns None (feeds service not enabled).
+        """
+        storage_provider = FakeStorageProvider(sqlite_storage)
+        sched = FakeScheduler()
+        feeds_provider = FakeFeedsProvider()
+        # Resolver with feeds capability for start() to succeed
+        resolver = FakeResolver(
+            feeds=feeds_provider,
+            scheduler=sched,
+            entity_storage=storage_provider,
+            configuration=None,
+        )
+        svc = FeedBriefingService()
+        await svc.on_config_changed({"enabled": True})
+        await svc.start(resolver)
+        try:
+            # Patch resolver to return None for feeds capability
+            resolver.caps["feeds"] = None
+            assert await svc.greeting_context(user_id="alice") is None
+        finally:
+            await svc.stop()
+
+    def test_feed_briefing_advertises_capability_and_config(
+        self, briefing_svc: Any
+    ) -> None:
+        svc, _, _, _ = briefing_svc
+        info = svc.service_info()
+        assert "greeting_context" in info.capabilities
+        keys = {p.key for p in svc.config_params()}
+        assert "briefing_max_seconds" in keys

@@ -48,7 +48,7 @@ import type {
 } from "@/types/config";
 import type { Job } from "@/types/scheduler";
 import type { SlashCommand } from "@/types/slash";
-import type { InstalledPlugin, InstallPluginResponse } from "@/types/plugins";
+import type { InstalledPlugin, InstallPluginResponse, SetEnabledResult } from "@/types/plugins";
 import type {
   McpResourceContent,
   McpResourceSpec,
@@ -1062,6 +1062,9 @@ export function useWsApi() {
         type: "plugins.restart_host",
       }),
 
+    setPluginEnabled: (name: string, enabled: boolean) =>
+      rpc<SetEnabledResult>({ type: "plugins.set_enabled", name, enabled }),
+
     // ── Usage reporting ───────────────────────────────────────────
 
     queryUsage: (payload: UsageQueryPayload) =>
@@ -1345,6 +1348,13 @@ export function useWsApi() {
 
     listProposalCycles: (params?: { kind?: string; limit?: number }) =>
       rpc<ProposalsListCyclesResult>({ type: "proposals.list_cycles", ...params }),
+
+    // ── Greeting ──────────────────────────────────────────────────
+
+    listGreetingContextProviders: () =>
+      rpc<{ providers: { id: string; label: string; enabled: boolean }[] }>({
+        type: "greeting.context_providers.list",
+      }).then((r) => r.providers),
 
     // ── Notifications ─────────────────────────────────────────────
 
