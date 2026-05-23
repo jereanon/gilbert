@@ -6102,6 +6102,14 @@ class AIService(Service):
                 # so other members' frontends can bump their per-room
                 # unread-mention badge live, without waiting for the
                 # next ``chat.conversation.list`` refetch.
+                #
+                # ``attachments`` carries Gilbert's reply attachments;
+                # ``user_attachments`` carries the human's uploaded
+                # files (images, etc.). Previously the user-side bucket
+                # was dropped from the broadcast — Jeremy posts an
+                # image in a shared room, Root sitting in the same room
+                # gets the event but the image never appeared until
+                # they switched conversations and forced a refetch.
                 gilbert = conn.manager.gilbert
                 if gilbert:
                     await publish_event(
@@ -6115,6 +6123,7 @@ class AIService(Service):
                             "user_message": message,
                             "ui_blocks": ui_blocks,
                             "attachments": _serialize_attachments_for_wire(reply_attachments),
+                            "user_attachments": _serialize_attachments_for_wire(attachments),
                             "mentioned_user_ids": list(mentioned_ids),
                         },
                     )

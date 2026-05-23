@@ -852,13 +852,27 @@ export function ChatPage() {
               const replyText = (data.content as string) || "";
               const replyAttachments =
                 (data.attachments as FileAttachment[]) || [];
-              if (userText || replyText || replyAttachments.length > 0) {
+              // The human's uploaded attachments. Previously the
+              // broadcast payload didn't carry these, so an image
+              // posted by another member appeared blank in the
+              // live event — it would only show up after the next
+              // ``chat.history.load`` refetch (e.g. tab-switch). The
+              // server now ships ``user_attachments`` separately from
+              // the AI's reply ``attachments``.
+              const userAttachments =
+                (data.user_attachments as FileAttachment[]) || [];
+              if (
+                userText ||
+                replyText ||
+                replyAttachments.length > 0 ||
+                userAttachments.length > 0
+              ) {
                 setTurns((prev) => [
                   ...prev,
                   {
                     user_message: {
                       content: userText,
-                      attachments: [],
+                      attachments: userAttachments,
                       author_id: data.author_id as string,
                       author_name: data.author_name as string,
                     },
