@@ -17,6 +17,7 @@ from gilbert.interfaces.auth import UserContext
 from gilbert.interfaces.configuration import ConfigParam
 from gilbert.interfaces.events import Event, EventBus, EventBusProvider
 from gilbert.interfaces.feeds import FeedsProvider
+from gilbert.interfaces.greeting import GreetingContext, GreetingContextProvider
 from gilbert.interfaces.health import GreetingBrief, HealthProvider
 from gilbert.interfaces.presence import PresenceProvider
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
@@ -135,6 +136,10 @@ class GreetingService(Service):
         self._health: HealthProvider | None = None
         self._include_health_brief: bool = True
 
+        # Context provider discovery and assembly
+        self._enabled_context_providers: list[str] | None = None  # None = "all"
+        self._context_providers: list[GreetingContextProvider] = []
+
         # Camera-event announcement config + state.
         self._announce_camera_labels: tuple[str, ...] = (
             _DEFAULT_ANNOUNCE_CAMERA_LABELS
@@ -182,6 +187,7 @@ class GreetingService(Service):
 
     async def start(self, resolver: ServiceResolver) -> None:
         self._resolver = resolver
+        self._discover_context_providers()
 
         # Check enabled
         config_svc = resolver.get_capability("configuration")
@@ -460,6 +466,19 @@ class GreetingService(Service):
                 ),
                 default={},
             ),
+            ConfigParam(
+                key="enabled_context_providers",
+                type=ToolParameterType.ARRAY,
+                description=(
+                    "Which context providers to include in the available_context "
+                    "block of the greeting prompt. Discovered providers — Weather, "
+                    "News briefing, Health, etc. — appear here as toggleable rows. "
+                    "Leave empty to disable all extras; omit (default) to include "
+                    "every discovered provider."
+                ),
+                default=None,
+                required=False,
+            ),
         ]
 
     async def on_config_changed(self, config: dict[str, Any]) -> None:
@@ -533,6 +552,9 @@ class GreetingService(Service):
                 for k, v in per_label.items()
                 if isinstance(v, str) and v.strip()
             }
+        if "enabled_context_providers" in config:
+            raw = config["enabled_context_providers"]
+            self._enabled_context_providers = list(raw) if raw is not None else None
 
     async def _greet_already_present(self) -> None:
         """Greet anyone already present at startup who hasn't been greeted today.
@@ -833,6 +855,61 @@ class GreetingService(Service):
             )
             return None
         return brief
+
+    def _discover_context_providers(self) -> None:
+        """Populate self._context_providers from the resolver.
+
+        Idempotent: callable any time after self._resolver is set.
+        """
+        if self._resolver is None:
+            self._context_providers = []
+            return
+        self._context_providers = [
+            svc for svc in self._resolver.get_all("greeting_context")
+            if isinstance(svc, GreetingContextProvider)
+        ]
+
+    def available_context_providers(self) -> list[dict[str, str]]:
+        """Return the discovered providers' ids + labels for the settings
+        UI. Order is stable (registration order)."""
+        return [
+            {"id": p.greeting_context_id, "label": p.greeting_context_label}
+            for p in self._context_providers
+        ]
+
+    async def collect_context_block(self, user_id: str) -> str:
+        """Call each enabled provider, format non-None results into a
+        labeled block. Returns ``""`` when no providers contribute.
+
+        A provider raising is logged and skipped — never blocks the
+        greeting.
+        """
+        if not self._context_providers:
+            return ""
+        enabled = (
+            set(self._enabled_context_providers)
+            if self._enabled_context_providers is not None
+            else None
+        )
+        entries: list[GreetingContext] = []
+        for provider in self._context_providers:
+            if enabled is not None and provider.greeting_context_id not in enabled:
+                continue
+            try:
+                ctx = await provider.greeting_context(user_id)
+            except Exception:
+                logger.debug(
+                    "GreetingContextProvider %s raised; skipping",
+                    provider.greeting_context_id,
+                    exc_info=True,
+                )
+                continue
+            if ctx is None or not ctx.prose:
+                continue
+            entries.append(ctx)
+        if not entries:
+            return ""
+        return "\n".join(f"{e.label}: {e.prose}" for e in entries)
 
     @staticmethod
     def _format_health_brief(brief: GreetingBrief | None) -> str:
