@@ -177,6 +177,18 @@ async def telnyx_media(ws: WebSocket) -> None:
             return
 
         start = start_frame.get("start", {}) or {}
+        # Dump the entire start frame so we can see Telnyx's actual
+        # field names — earlier guesswork had us using ``stream_id``
+        # for the outbound media frames but the start frame yielded
+        # an empty string, suggesting the key is named something else
+        # (``stream_sid``? ``stream_uuid``? nested differently?).
+        logger.info(
+            "Telnyx media WS: start frame body: top-keys=%s start-keys=%s "
+            "full=%s",
+            sorted(start_frame.keys()),
+            sorted(start.keys()),
+            start_frame,
+        )
         cc_id = str(start.get("call_control_id") or "")
         params = start.get("custom_parameters") or {}
         token = str(params.get("token") or "")
