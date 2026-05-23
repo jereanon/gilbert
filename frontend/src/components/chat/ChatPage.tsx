@@ -1317,6 +1317,7 @@ export function ChatPage() {
                   }))
                 : undefined
             }
+            typingConversationId={isShared ? activeConvId : null}
           />
         )}
 

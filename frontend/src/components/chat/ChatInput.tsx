@@ -21,6 +21,7 @@ import {
 import { useWsApi } from "@/hooks/useWsApi";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useAuth } from "@/hooks/useAuth";
+import { useTypingBroadcast } from "@/hooks/useTyping";
 import type { SlashCommand, SlashParameter } from "@/types/slash";
 import type { FileAttachment } from "@/types/chat";
 import {
@@ -116,6 +117,10 @@ interface ChatInputProps {
    *  surfaces these members (plus the Gilbert pseudo-user). Personal
    *  chats pass ``undefined`` and the picker stays disabled. */
   mentionableMembers?: Array<{ user_id: string; display_name: string }>;
+  /** Conversation id to scope typing-indicator broadcasts. Set in
+   *  shared rooms only — in personal chats the only listener would
+   *  be the typer themselves, so we suppress the broadcast. */
+  typingConversationId?: string | null;
 }
 
 const readAsBase64 = (blob: Blob): Promise<string> =>
@@ -400,6 +405,7 @@ export function ChatInput({
   modelSelection,
   onModelChange,
   mentionableMembers,
+  typingConversationId,
 }: ChatInputProps) {
   // The textarea stays editable even while Gilbert is thinking so the
   // user can start drafting their next message. ``sending`` only
@@ -407,6 +413,13 @@ export function ChatInput({
   // gone because a disabled textarea blocked the whole point of the
   // interrupt feature.
   const disabled = false;
+
+  // Typing-indicator broadcast — enabled only when a conversation id
+  // is passed in (shared rooms). The hook coalesces keystrokes into
+  // ``chat.typing.start`` / ``stop`` frames; we wire ``notifyTyping``
+  // into ``handleInput`` below and ``flushStop`` into ``handleSend``.
+  const { notifyTyping: notifyTypingRaw, flushStop: flushTypingStop } =
+    useTypingBroadcast(typingConversationId ?? null, Boolean(typingConversationId));
   const [message, setMessage] = useState("");
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   // Mention picker state — separate index from the slash picker so the
@@ -568,6 +581,10 @@ export function ChatInput({
       .map((p) => p.attachment)
       .filter((a): a is FileAttachment => a !== null);
     if (!trimmed && outgoing.length === 0) return;
+    // Tell the room we stopped typing before the send fans out. If we
+    // wait until the message lands, the indicator briefly overlaps the
+    // new message — distracting.
+    flushTypingStop();
     onSend(trimmed, outgoing);
     const hist = historyRef.current;
     if (trimmed && hist[hist.length - 1] !== trimmed) {
@@ -736,6 +753,16 @@ export function ChatInput({
     // Track the textarea caret so the mention picker can resolve a
     // mention-in-progress without re-reading from the DOM each render.
     setCursorPos(el.selectionStart ?? 0);
+    // Broadcast typing — no-op in personal chats (the hook is disabled
+    // when ``typingConversationId`` is falsy). The hook coalesces
+    // keystrokes so this isn't a per-character firehose on the wire.
+    if (e.target.value.length > 0) {
+      notifyTypingRaw();
+    } else {
+      // Cleared the textarea — emit stop immediately so other members
+      // don't see the indicator linger.
+      flushTypingStop();
+    }
   }
 
   function handleSelectionChange(e: React.SyntheticEvent<HTMLTextAreaElement>) {
