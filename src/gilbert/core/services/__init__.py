@@ -3,6 +3,7 @@
 from gilbert.core.services.access_control import AccessControlService
 from gilbert.core.services.ai import AIService
 from gilbert.core.services.auth import AuthService
+from gilbert.core.services.calendar import CalendarService
 from gilbert.core.services.configuration import ConfigurationService
 from gilbert.core.services.doorbell import DoorbellService
 from gilbert.core.services.event_bus import EventBusService
@@ -22,6 +23,7 @@ __all__ = [
     "AccessControlService",
     "AIService",
     "AuthService",
+    "CalendarService",
     "DoorbellService",
     "ConfigurationService",
     "EventBusService",
