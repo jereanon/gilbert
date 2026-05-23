@@ -319,10 +319,27 @@ class WsConnectionManager:
     Service-provided handlers are discovered via the ``ws_handlers``
     capability (services implementing ``WsHandlerProvider``).  Core
     ``gilbert.*`` handlers are always registered from this module.
+
+    Also tracks **session presence** — which user_ids currently have at
+    least one WebSocket connection open. Distinct from ``PresenceService``
+    (that one tracks physical occupancy via wifi/MAC observations); this
+    one is the cheap "is someone using Gilbert right now" signal that
+    powers the green online dot in shared rooms.
+
+    The map is rebuilt incrementally by ``register()``/``unregister()`` —
+    on the first connection for a user we emit ``chat.user.online`` to
+    the bus, and on the last disconnect we emit ``chat.user.offline``.
+    Multiple tabs / clients per user are fine — only edge transitions
+    fire events.
     """
 
     def __init__(self) -> None:
         self._connections: set[WsConnection] = set()
+        # user_id → set of active WsConnections. Map is the source of
+        # truth for online-now; we recompute counts off it on every
+        # register/unregister so a stale connection in ``_connections``
+        # can't desync the online set.
+        self._user_connections: dict[str, set[WsConnection]] = {}
         self._unsubscribe: Callable[[], None] | None = None
         self.gilbert: Any = None
         # Combined handler registry: core + service-provided
@@ -376,15 +393,73 @@ class WsConnectionManager:
 
     def register(self, conn: WsConnection) -> None:
         self._connections.add(conn)
+        # Online-presence tracking. ``user_id`` is empty for unauth'd
+        # peer connections; skip those — they don't represent a person.
+        uid = conn.user_id
+        if not uid:
+            return
+        bucket = self._user_connections.setdefault(uid, set())
+        was_empty = not bucket
+        bucket.add(conn)
+        if was_empty:
+            self._publish_online_event(conn, "chat.user.online")
 
     def unregister(self, conn: WsConnection) -> None:
         self._connections.discard(conn)
         conn.cancel_pending_outbound()
         conn.run_close_callbacks()
+        uid = conn.user_id
+        if not uid:
+            return
+        bucket = self._user_connections.get(uid)
+        if bucket is None:
+            return
+        bucket.discard(conn)
+        if not bucket:
+            # Last connection for this user closed — they're offline now.
+            del self._user_connections[uid]
+            self._publish_online_event(conn, "chat.user.offline")
 
     @property
     def connection_count(self) -> int:
         return len(self._connections)
+
+    def online_user_ids(self) -> set[str]:
+        """Snapshot of user_ids that currently have ≥1 WS connection."""
+        return set(self._user_connections.keys())
+
+    def _publish_online_event(self, conn: WsConnection, event_type: str) -> None:
+        """Emit a chat.user.online / chat.user.offline event to the bus.
+
+        Best-effort: if there's no event bus wired up yet (early in
+        startup, or in tests) this silently no-ops. The local
+        ``_user_connections`` map is still accurate — clients that hit
+        the snapshot RPC will see correct state.
+        """
+        if self.gilbert is None:
+            return
+        try:
+            event_bus_svc = self.gilbert.service_manager.get_by_capability("event_bus")
+        except Exception:  # noqa: BLE001 — service_manager unavailable
+            return
+        if event_bus_svc is None or not isinstance(event_bus_svc, EventBusProvider):
+            return
+        # Fire-and-forget on the running loop. ``EventBus.publish`` is
+        # async; from a sync caller we schedule it and don't wait. If
+        # we're not in a loop (unlikely from the WS lifecycle), give up.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        event = Event(
+            event_type=event_type,
+            source="ws_manager",
+            data={
+                "user_id": conn.user_id,
+                "display_name": conn.display_name,
+            },
+        )
+        loop.create_task(event_bus_svc.bus.publish(event))
 
     async def _dispatch_event(self, event: Event) -> None:
         """Dispatch a bus event to all eligible connections."""
@@ -440,6 +515,23 @@ async def _handle_sub_list(conn: WsConnection, frame: dict[str, Any]) -> dict[st
 async def _handle_ping(conn: WsConnection, frame: dict[str, Any]) -> dict[str, Any] | None:
     conn.last_ping = time.monotonic()
     return {"type": "gilbert.pong"}
+
+
+@rpc_handler("chat.presence.online_users")
+async def _handle_online_users(
+    conn: WsConnection, frame: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Return the set of user_ids that currently have ≥1 WS connection.
+
+    The bus emits ``chat.user.online`` / ``chat.user.offline`` events
+    for transitions, but a freshly-loaded UI needs the snapshot to render
+    the green dot on members who were already online before its WS opened.
+    """
+    return {
+        "type": "chat.presence.online_users.result",
+        "ref": frame.get("id"),
+        "user_ids": sorted(conn.manager.online_user_ids()),
+    }
 
 
 @rpc_handler("gilbert.peer.publish")

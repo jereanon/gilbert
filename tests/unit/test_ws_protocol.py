@@ -252,6 +252,84 @@ class TestConnectionManager:
         assert not guest_conn.queue.empty()
 
 
+# --- Online presence (session-level) ---
+
+
+class TestOnlinePresence:
+    """``WsConnectionManager`` tracks which user_ids have ≥1 WS open.
+
+    The set powers the green-dot online indicator in shared rooms.
+    Transitions emit events to the bus; the steady-state set is exposed
+    via ``online_user_ids()`` for the ``chat.presence.online_users`` RPC.
+    """
+
+    def test_first_connection_marks_user_online(self) -> None:
+        manager = WsConnectionManager()
+        user = UserContext(user_id="alice", email="", display_name="Alice", roles=frozenset())
+        conn = WsConnection(user, 100, manager)
+
+        assert manager.online_user_ids() == set()
+        manager.register(conn)
+        assert manager.online_user_ids() == {"alice"}
+
+    def test_multiple_tabs_count_as_one_online(self) -> None:
+        manager = WsConnectionManager()
+        user = UserContext(user_id="alice", email="", display_name="Alice", roles=frozenset())
+        tab1 = WsConnection(user, 100, manager)
+        tab2 = WsConnection(user, 100, manager)
+        tab3 = WsConnection(user, 100, manager)
+
+        manager.register(tab1)
+        manager.register(tab2)
+        manager.register(tab3)
+        assert manager.online_user_ids() == {"alice"}
+
+        # Closing one tab keeps the user online — they still have two left.
+        manager.unregister(tab2)
+        assert manager.online_user_ids() == {"alice"}
+
+        # Closing the last two drops them.
+        manager.unregister(tab1)
+        manager.unregister(tab3)
+        assert manager.online_user_ids() == set()
+
+    def test_multiple_users_tracked_independently(self) -> None:
+        manager = WsConnectionManager()
+        alice = WsConnection(
+            UserContext(user_id="alice", email="", display_name="Alice", roles=frozenset()),
+            100,
+            manager,
+        )
+        bob = WsConnection(
+            UserContext(user_id="bob", email="", display_name="Bob", roles=frozenset()),
+            100,
+            manager,
+        )
+
+        manager.register(alice)
+        manager.register(bob)
+        assert manager.online_user_ids() == {"alice", "bob"}
+
+        manager.unregister(alice)
+        assert manager.online_user_ids() == {"bob"}
+
+    def test_unauth_connection_does_not_appear_online(self) -> None:
+        """A peer / unauth connection has an empty user_id and shouldn't be
+        treated as a person-online signal."""
+        manager = WsConnectionManager()
+        anon = WsConnection(
+            UserContext(user_id="", email="", display_name="", roles=frozenset()),
+            200,
+            manager,
+        )
+        manager.register(anon)
+        assert manager.online_user_ids() == set()
+
+        # Cleanup shouldn't break either.
+        manager.unregister(anon)
+        assert manager.online_user_ids() == set()
+
+
 # --- Frame dispatch ---
 
 
