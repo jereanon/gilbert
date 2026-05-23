@@ -616,9 +616,21 @@ class PhoneCallService(Service):
                 description=(
                     "Place an outbound phone call. Gilbert will identify "
                     "himself as an automated assistant calling on behalf "
-                    "of the user and follow the brief. The user can watch "
-                    "the live transcript on the Calls page (/calls) and "
-                    "intervene by text from there. "
+                    "of the user and follow the brief. "
+                    "\n\n"
+                    "After this tool returns, reply to the user with a "
+                    "SHORT acknowledgement only — one sentence, like "
+                    "\"Calling now — I'll let you know when it wraps.\" "
+                    "Do NOT echo the phone number, the brief, the call "
+                    "id, or any other details from the tool result — "
+                    "those are bookkeeping for the system, not for the "
+                    "user. The user already knows what they asked you "
+                    "to do; restating it sounds robotic. "
+                    "\n\n"
+                    "When the call ends a summary will be posted back "
+                    "into this chat automatically (transcript, outcome, "
+                    "duration). You do NOT need to follow up yourself — "
+                    "the system handles it. "
                     "\n\n"
                     "IMPORTANT: ALWAYS invoke this tool when the user "
                     "asks to make a call. Do NOT assume from chat history "
@@ -626,14 +638,7 @@ class PhoneCallService(Service):
                     "live in their own store, not in this conversation. "
                     "The tool itself enforces the one-active-call-per-user "
                     "limit and will return a specific error if a real "
-                    "active call exists. If you THINK a call is in "
-                    "progress but the user is asking again, the previous "
-                    "call almost certainly ended; place the new call. "
-                    "\n\n"
-                    "This tool does NOT deliver outcome notifications "
-                    "back into chat — do not promise the user you'll "
-                    "report back here. Direct them to /calls for the "
-                    "transcript and outcome."
+                    "active call exists."
                 ),
                 parameters=[
                     ToolParameter(
@@ -715,19 +720,15 @@ class PhoneCallService(Service):
             )
         except RuntimeError as exc:
             return f"Could not place the call: {exc}"
-        # Note carefully — the LLM has historically interpreted "I'll
-        # report back" as a promise to the user that it'll deliver an
-        # outcome message later in chat. We don't have that wiring yet
-        # (the call ends as a bus event the AIService doesn't currently
-        # listen to). Phrase the tool result as "I started the call,
-        # you go watch it" — no promise, just a hand-off.
-        return (
-            f"I started a phone call to {to_number} (call id `{call_id}`). "
-            "It's running in the background — the live transcript is on the "
-            "Calls page (/calls) and you can intervene by text from there. "
-            "I won't get a notification when the call ends, so don't expect "
-            "a follow-up in this chat; check the Calls page for the outcome."
-        )
+        # Tool result is for the LLM to act on, not to relay verbatim
+        # — the tool description tells the LLM to reply to the user
+        # with a short acknowledgement. Keep this string minimal so
+        # there's nothing tempting to parrot. The call_id is here for
+        # the rare follow-up-by-id case (e.g. "cancel that call").
+        # ``_on_call_ended`` posts the final summary into this same
+        # conversation when the call wraps, so no "go check /calls"
+        # exhortation needed.
+        return f"Call started. call_id={call_id}"
 
     # --- start_call (the public entry point) ------------------------
 
