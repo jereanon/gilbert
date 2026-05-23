@@ -16,11 +16,13 @@ import { useWsApi } from "@/hooks/useWsApi";
 import {
   AlertTriangleIcon,
   CheckIcon,
+  ChevronDownIcon,
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
   FileIcon,
   FileTextIcon,
+  ImageIcon,
   LoaderIcon,
   SquareIcon,
   WrenchIcon,
@@ -608,7 +610,22 @@ export function AttachmentChip({
   const [busy, setBusy] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [refImageDataUrl, setRefImageDataUrl] = useState<string | null>(null);
+  // Collapsed state for inline images — click the chevron in the
+  // top-right corner to fold the image down to a thin "📷 filename"
+  // bar; click the bar to expand again. Off by default so first-view
+  // sees the image. Per-instance, not persisted (room reload resets).
+  const [imageCollapsed, setImageCollapsed] = useState(false);
   const isReference = isReferenceAttachment(attachment);
+  // Treat anything whose media_type is ``image/*`` as an image, even
+  // if its persisted ``kind`` is the catch-all ``"file"``. The
+  // chat-upload route used to set ``kind: "file"`` for every upload
+  // including PNGs — those rows are now classified server-side, but
+  // existing conversations carry the old shape and we render them
+  // properly by checking the MIME instead of just the kind.
+  const isImage =
+    attachment.kind === "image" ||
+    (attachment.kind === "file" &&
+      (attachment.media_type ?? "").startsWith("image/"));
 
   // For reference-mode images, fetch the bytes via the WS RPC and
   // build a ``data:`` URL so the image can render inline. Tool-
@@ -617,7 +634,7 @@ export function AttachmentChip({
   // download flow).
   useEffect(() => {
     let cancelled = false;
-    if (!isReference || attachment.kind !== "image") return;
+    if (!isReference || !isImage) return;
     if (refImageDataUrl) return;
     (async () => {
       try {
@@ -643,7 +660,7 @@ export function AttachmentChip({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     isReference,
-    attachment.kind,
+    isImage,
     attachment.workspace_skill,
     attachment.workspace_path,
     attachment.workspace_conv,
@@ -737,7 +754,7 @@ export function AttachmentChip({
     </div>
   );
 
-  if (attachment.kind === "image") {
+  if (isImage) {
     // Resolve the source: inline data, or fetched-via-WS reference
     // bytes. For reference-mode images we always try inline render
     // first; if the fetch failed (refImageDataUrl is null and the
@@ -746,44 +763,92 @@ export function AttachmentChip({
       ? `data:${attachment.media_type};base64,${attachment.data ?? ""}`
       : refImageDataUrl;
 
+    const altText = attachment.name || `attachment ${index + 1}`;
+
     if (inlineSrc) {
+      // Collapsed form — a thin bar with a camera icon and the
+      // filename. Click anywhere on the bar to expand again. Useful
+      // when Gilbert posts a tall screenshot that pushes the rest of
+      // the conversation off-screen.
+      if (imageCollapsed) {
+        return (
+          <button
+            type="button"
+            onClick={() => setImageCollapsed(false)}
+            className="group/img inline-flex items-center gap-2 rounded-md border bg-muted/40 px-2 py-1 text-xs hover:bg-muted"
+            title={`Expand ${altText}`}
+          >
+            <ImageIcon className="size-3.5 text-muted-foreground shrink-0" />
+            <span className="truncate max-w-[14rem]">{altText}</span>
+            <ChevronRightIcon className="size-3.5 text-muted-foreground shrink-0" />
+          </button>
+        );
+      }
+
+      // Expanded form — the actual image, with a chevron in the
+      // top-right corner that collapses on click. ``stopPropagation``
+      // on the chevron so it doesn't also trigger the link / onOpen
+      // wrapping the image.
+      const collapseChevron = (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setImageCollapsed(true);
+          }}
+          className="absolute top-1 right-1 z-10 inline-flex size-6 items-center justify-center rounded-full bg-background/90 text-foreground/70 shadow-sm opacity-0 transition-opacity group-hover/img:opacity-100 hover:text-foreground hover:bg-background"
+          title="Hide image"
+          aria-label={`Hide ${altText}`}
+        >
+          <ChevronDownIcon className="size-3.5" />
+        </button>
+      );
+
       const img = (
         <img
           src={inlineSrc}
-          alt={attachment.name || `attachment ${index + 1}`}
+          alt={altText}
           className="max-h-60 max-w-[16rem] object-cover"
         />
       );
       // Clickable shell — onOpen lets parent components hijack the
       // click (e.g. the agent UI opens the workspace viewer instead
-      // of opening the image in a new tab).
+      // of opening the image in a new tab). The chevron is layered
+      // on top of whichever wrapper we pick.
       if (onOpen) {
         return (
-          <button
-            type="button"
-            onClick={() => onOpen(attachment)}
-            className="block overflow-hidden rounded-lg border bg-muted hover:bg-muted/70"
-            title={attachment.name || `attachment ${index + 1}`}
-          >
-            {img}
-          </button>
+          <div className="group/img relative inline-block">
+            <button
+              type="button"
+              onClick={() => onOpen(attachment)}
+              className="block overflow-hidden rounded-lg border bg-muted hover:bg-muted/70"
+              title={altText}
+            >
+              {img}
+            </button>
+            {collapseChevron}
+          </div>
         );
       }
       return (
-        <a
-          href={inlineSrc}
-          target="_blank"
-          rel="noreferrer"
-          className="block overflow-hidden rounded-lg border bg-muted"
-        >
-          {img}
-        </a>
+        <div className="group/img relative inline-block">
+          <a
+            href={inlineSrc}
+            target="_blank"
+            rel="noreferrer"
+            className="block overflow-hidden rounded-lg border bg-muted"
+          >
+            {img}
+          </a>
+          {collapseChevron}
+        </div>
       );
     }
     // Reference-mode image whose fetch hasn't completed (or failed):
     // render the chip as a fallback.
     return refChip(
-      attachment.name || `image ${index + 1}`,
+      altText,
       `${attachment.media_type} · workspace file`,
       <FileIcon className="size-5 text-muted-foreground" />,
     );

@@ -271,8 +271,19 @@ async def upload_chat_file(
     except Exception:
         logger.debug("failed to register uploaded file", exc_info=True)
 
+    # Classify by media type so the frontend renders images inline
+    # (``<img>`` tag) instead of as a generic download chip. PDFs and
+    # similar AI-readable types map to ``document``; everything else
+    # stays ``file``. ``kind`` drives the ``AttachmentChip`` switch and
+    # is also what services like Vision use to gate processing.
+    kind = "file"
+    if media_type.startswith("image/"):
+        kind = "image"
+    elif media_type == "application/pdf" or media_type.startswith("text/"):
+        kind = "document"
+
     return {
-        "kind": "file",
+        "kind": kind,
         "name": unique_name,
         "media_type": media_type,
         "workspace_skill": "workspace",

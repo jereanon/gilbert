@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { TurnBubble } from "./TurnBubble";
+import { TypingFooter } from "./TypingFooter";
 import type { ChatTurn } from "@/types/chat";
 import type { UIBlock } from "@/types/ui";
 import { UIBlockRenderer } from "@/components/ui/UIBlockRenderer";
@@ -133,6 +134,14 @@ export function MessageList({
             <UIBlockRenderer block={block} onSubmit={onBlockSubmit} />
           </div>
         ))}
+
+        {/* "X is typing…" footer. Only renders inside shared rooms —
+            the hook returns an empty list outside the conv and the
+            component renders nothing on empty. Positioned just above
+            the scroll anchor so the auto-scroll keeps it in view. */}
+        {isShared && conversationId && (
+          <TypingFooter conversationId={conversationId} />
+        )}
 
         <div ref={bottomRef} />
       </div>

@@ -321,6 +321,50 @@ def test_upload_writes_file_to_disk_and_returns_reference(
     assert expected_path.read_bytes() == payload
 
 
+def test_upload_classifies_images_as_image_kind(app: FastAPI) -> None:
+    """``image/*`` media types must come back with ``kind: "image"`` so
+    the frontend renders inline (``<img>``) instead of as a generic
+    download chip. The previous behavior stuffed every upload into
+    ``kind: "file"`` which is why screenshots displayed as a download
+    button until you switched conversations and refetched."""
+    _override_auth(app, _OWNER_USER)
+    client = TestClient(app)
+
+    payload = b"\x89PNG\r\n\x1a\n" + b"\0" * 32  # minimal PNG-ish header
+    resp = client.post(
+        "/api/chat/upload",
+        data={"conversation_id": "conv-owned"},
+        files={"file": ("screenshot.png", payload, "image/png")},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["kind"] == "image"
+    assert body["media_type"] == "image/png"
+
+
+def test_upload_classifies_pdf_as_document(app: FastAPI) -> None:
+    """PDFs and text files map to ``document`` so the AI-readable
+    pipeline picks them up. Everything else stays the generic ``file``."""
+    _override_auth(app, _OWNER_USER)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/chat/upload",
+        data={"conversation_id": "conv-owned"},
+        files={"file": ("doc.pdf", b"%PDF-1.4\n%%EOF", "application/pdf")},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["kind"] == "document"
+
+    resp2 = client.post(
+        "/api/chat/upload",
+        data={"conversation_id": "conv-owned"},
+        files={"file": ("notes.txt", b"hello", "text/plain")},
+    )
+    assert resp2.status_code == 200, resp2.text
+    assert resp2.json()["kind"] == "document"
+
+
 def test_upload_rejects_unauthenticated(app: FastAPI) -> None:
     _override_auth(app, None)
     client = TestClient(app)

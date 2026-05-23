@@ -127,12 +127,13 @@ export function ChatPage() {
     activeConvIdRef.current = activeConvId;
   }, [activeConvId]);
 
-  // Reset the user's "unread mentions" cursor when they open a room.
-  // Optimistically zero the count in the cached conversations list so
-  // the sidebar badge clears immediately — the server-side cursor
-  // advance is async and the next ``chat.conversation.list`` refresh
-  // would otherwise leave a stale badge on screen. Personal
-  // conversations don't have mention tracking so we skip them.
+  // Reset both unread cursors (mentions + messages) when the user
+  // opens a room. Optimistically zero both counts in the cached
+  // conversations list so the sidebar clears immediately — the
+  // server-side cursor advance is async and the next
+  // ``chat.conversation.list`` refresh would otherwise leave a stale
+  // badge on screen. Personal conversations don't have multi-member
+  // unread tracking so we skip them.
   useEffect(() => {
     if (!activeConvId || !connected || !isShared) return;
     queryClient.setQueryData<ConversationSummary[] | undefined>(
@@ -140,16 +141,24 @@ export function ChatPage() {
       (prev) =>
         prev?.map((c) =>
           c.conversation_id === activeConvId
-            ? { ...c, unread_mentions_count: 0 }
+            ? {
+                ...c,
+                unread_mentions_count: 0,
+                unread_messages_count: 0,
+              }
             : c,
         ),
     );
+    // ``chat.conversation.mark_read`` advances BOTH cursors. The
+    // narrower ``mark_mentions_read`` still exists for the mention-bell
+    // flow where the user wants to clear the @-badge without claiming
+    // they've read the whole thread.
     void rpc({
-      type: "chat.conversation.mark_mentions_read",
+      type: "chat.conversation.mark_read",
       conversation_id: activeConvId,
     } as Record<string, unknown>).catch((err) => {
       // eslint-disable-next-line no-console
-      console.debug("mark_mentions_read failed", err);
+      console.debug("mark_read failed", err);
     });
   }, [activeConvId, connected, isShared, queryClient, rpc]);
 
@@ -822,9 +831,17 @@ export function ChatPage() {
       const convId = data.conversation_id as string;
 
       switch (event.event_type) {
-        case "chat.message.created":
+        case "chat.message.created": {
+          const isOwnMessage = data.author_id === user?.user_id;
+          const mentionedUserIds =
+            (data.mentioned_user_ids as string[] | undefined) ?? [];
+          const mentionsMe =
+            !!user?.user_id && mentionedUserIds.includes(user.user_id);
+
           if (convId === activeConvId) {
-            const isOwnMessage = data.author_id === user?.user_id;
+            // Active room — render the new turn (existing behavior)
+            // and silently advance the server-side read cursor so the
+            // sidebar doesn't badge this conv when you tab away.
             if (!isOwnMessage) {
               // Shared-room broadcast: another user posted a message
               // and Gilbert may have replied. We don't get structured
@@ -835,13 +852,27 @@ export function ChatPage() {
               const replyText = (data.content as string) || "";
               const replyAttachments =
                 (data.attachments as FileAttachment[]) || [];
-              if (userText || replyText || replyAttachments.length > 0) {
+              // The human's uploaded attachments. Previously the
+              // broadcast payload didn't carry these, so an image
+              // posted by another member appeared blank in the
+              // live event — it would only show up after the next
+              // ``chat.history.load`` refetch (e.g. tab-switch). The
+              // server now ships ``user_attachments`` separately from
+              // the AI's reply ``attachments``.
+              const userAttachments =
+                (data.user_attachments as FileAttachment[]) || [];
+              if (
+                userText ||
+                replyText ||
+                replyAttachments.length > 0 ||
+                userAttachments.length > 0
+              ) {
                 setTurns((prev) => [
                   ...prev,
                   {
                     user_message: {
                       content: userText,
-                      attachments: [],
+                      attachments: userAttachments,
                       author_id: data.author_id as string,
                       author_name: data.author_name as string,
                     },
@@ -853,6 +884,15 @@ export function ChatPage() {
                   },
                 ]);
               }
+              // The user is looking right at this message — keep their
+              // server cursor at the head. Best-effort; a transient
+              // RPC failure just means the next refetch will catch up.
+              void rpc({
+                type: "chat.conversation.mark_read",
+                conversation_id: convId,
+              } as Record<string, unknown>).catch(() => {
+                // suppressed — see comment above
+              });
             }
             if ((data.ui_blocks as UIBlock[])?.length && !isOwnMessage) {
               setUiBlocks((prev) => [
@@ -860,8 +900,32 @@ export function ChatPage() {
                 ...(data.ui_blocks as UIBlock[]),
               ]);
             }
+          } else if (!isOwnMessage && convId) {
+            // Message arrived in a room the user ISN'T currently
+            // viewing. The conv-list query's 30-second staleTime
+            // would otherwise leave the sidebar badge missing for up
+            // to half a minute. Optimistically bump the unread
+            // counters on the cached summary so the dot / @-pill
+            // light up immediately.
+            queryClient.setQueryData<ConversationSummary[] | undefined>(
+              ["conversations"],
+              (prev) =>
+                prev?.map((c) => {
+                  if (c.conversation_id !== convId) return c;
+                  return {
+                    ...c,
+                    unread_messages_count:
+                      (c.unread_messages_count ?? 0) + 1,
+                    unread_mentions_count: mentionsMe
+                      ? (c.unread_mentions_count ?? 0) + 1
+                      : c.unread_mentions_count,
+                    message_count: (c.message_count ?? 0) + 1,
+                  };
+                }),
+            );
           }
           break;
+        }
         case "chat.member.joined":
           if (convId === activeConvId) {
             setMembers((prev) => [
@@ -1308,6 +1372,7 @@ export function ChatPage() {
                   }))
                 : undefined
             }
+            typingConversationId={isShared ? activeConvId : null}
           />
         )}
 
