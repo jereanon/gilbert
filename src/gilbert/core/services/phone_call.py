@@ -1110,6 +1110,22 @@ class PhoneCallService(Service):
                 log.exception("TTS synthesize failed")
                 return
 
+            # Diagnostic: are we getting actual ulaw bytes back? A
+            # short response, all-zeros prefix, or a header signature
+            # (RIFF / fLaC / OggS) all tell us the format-map fix
+            # wasn't enough.
+            audio = synth.audio
+            log.info(
+                "TTS synth complete — format=%s bytes=%d "
+                "first_8_hex=%s last_8_hex=%s zero_ratio=%.2f text_chars=%d",
+                synth.format,
+                len(audio),
+                audio[:8].hex(),
+                audio[-8:].hex() if len(audio) >= 8 else "",
+                (audio.count(b"\xff") + audio.count(b"\x7f")) / max(len(audio), 1),
+                len(text),
+            )
+
             speaking.active = True
             speaking.cancelled = False
             generation = speaking.generation = speaking.generation + 1
@@ -1117,13 +1133,23 @@ class PhoneCallService(Service):
                 # Write in ~20ms chunks (160 bytes mulaw @ 8kHz mono)
                 # so barge-in cancel takes effect within that window.
                 chunk_size = 160
+                chunks_written = 0
                 for i in range(0, len(synth.audio), chunk_size):
                     if speaking.cancelled or generation != speaking.generation:
                         break
                     await session.audio_out.write(synth.audio[i : i + chunk_size])
+                    chunks_written += 1
                     # Realtime pacing so we don't blast the carrier
                     # buffer (which can disable barge-in). 20ms.
                     await asyncio.sleep(0.02)
+                log.info(
+                    "TTS playback done — chunks_written=%d bytes=%d "
+                    "wall_seconds≈%.2f (cancelled=%s)",
+                    chunks_written,
+                    chunks_written * chunk_size,
+                    chunks_written * 0.02,
+                    speaking.cancelled,
+                )
             finally:
                 speaking.active = False
 
