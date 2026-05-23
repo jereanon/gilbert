@@ -253,6 +253,15 @@ async def telnyx_media(ws: WebSocket) -> None:
                             "Telnyx media WS: first inbound media chunk — call=%s",
                             session.call_id,
                         )
+                    # Periodic heartbeat so we can see if/when inbound
+                    # stalls during outbound TTS. Normal cadence is
+                    # ~50 chunks/sec so this fires once a second.
+                    if inbound_media_frames % 50 == 0:
+                        logger.info(
+                            "Telnyx media WS: inbound rolling count — call=%s frames=%d",
+                            session.call_id,
+                            inbound_media_frames,
+                        )
             elif ev == "stop":
                 # Carrier closing the media side. The webhook will
                 # follow up with the hangup event; we just let the
