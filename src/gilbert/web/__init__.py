@@ -76,6 +76,7 @@ def create_app(gilbert: Gilbert) -> FastAPI:
     from gilbert.web.routes.screens import router as screens_router
     from gilbert.web.routes.share import router as share_router
     from gilbert.web.routes.telnyx_webhooks import router as telnyx_router
+    from gilbert.web.routes.tls import router as tls_router
     from gilbert.web.routes.websocket import router as ws_router
 
     @app.get("/health")
@@ -96,6 +97,7 @@ def create_app(gilbert: Gilbert) -> FastAPI:
     app.include_router(screens_router)
     app.include_router(share_router)
     app.include_router(telnyx_router)
+    app.include_router(tls_router)
     app.include_router(ws_router)
 
     # MCP server endpoint — raw ASGI, not a FastAPI route (see
