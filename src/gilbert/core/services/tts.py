@@ -7,6 +7,7 @@ don't cut off the last word.
 import json
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from typing import Any
 
 from gilbert.core.output import cleanup_old_files, get_output_dir
@@ -28,9 +29,11 @@ from gilbert.interfaces.tools import (
 )
 from gilbert.interfaces.tts import (
     AudioFormat,
+    StreamingTTSCapability,
     SynthesisRequest,
     SynthesisResult,
     TTSBackend,
+    TTSCapabilityError,
     Voice,
     append_silence,
 )
@@ -226,6 +229,30 @@ class TTSService(Service):
                 characters_used=result.characters_used,
             )
         return result
+
+    def synthesize_stream(
+        self, request: SynthesisRequest,
+    ) -> AsyncIterator[bytes]:
+        """Synthesize speech as a stream of audio chunks.
+
+        Synchronous ``def`` (not ``async def``) so the capability check
+        raises at the call site rather than on the consumer's first
+        ``async for``. An async generator body wouldn't execute until
+        first ``__anext__``; consumers would then see ``TTSCapabilityError``
+        mid-iteration, which is confusing.
+
+        Streaming bypasses the service's ``silence_padding`` — that's a
+        finished-buffer concept and streaming consumers manage their
+        own tail.
+        """
+        if self._backend is None:
+            raise RuntimeError("TTS service is not enabled")
+        if not isinstance(self._backend, StreamingTTSCapability):
+            raise TTSCapabilityError(
+                f"backend {self._backend_name!r} does not support streaming synthesis"
+            )
+        self._ensure_ai_injection()
+        return self._backend.synthesize_stream(request)
 
     async def list_voices(self) -> list[Voice]:
         """List available voices from the backend."""
