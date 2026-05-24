@@ -7,11 +7,15 @@ import pytest
 from gilbert.core.services.tts import TTSService
 from gilbert.interfaces.tts import (
     AudioFormat,
+    BidirectionalTTSCapability,
     StreamingTTSCapability,
     SynthesisRequest,
     SynthesisResult,
     TTSBackend,
     TTSCapabilityError,
+    TTSEvent,
+    TTSStream,
+    TTSStreamConfig,
     Voice,
 )
 
@@ -107,9 +111,6 @@ async def test_synthesize_stream_raises_when_backend_none():
         svc.synthesize_stream(req)
 
 
-from gilbert.interfaces.tts import BidirectionalTTSCapability, TTSStream, TTSStreamConfig
-
-
 class _FakeBidirectionalStream(TTSStream):
     def __init__(self):
         self.sent: list[str] = []
@@ -125,7 +126,7 @@ class _FakeBidirectionalStream(TTSStream):
     async def close(self) -> None:
         self.closed = True
 
-    def events(self) -> AsyncIterator:
+    def events(self) -> AsyncIterator[TTSEvent]:
         async def _gen():
             if False:
                 yield  # pragma: no cover — empty iterator
