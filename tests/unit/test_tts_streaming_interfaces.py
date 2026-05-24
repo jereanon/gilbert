@@ -1,6 +1,7 @@
 """Shape tests for the streaming TTS interfaces."""
 
 from collections.abc import AsyncIterator
+from dataclasses import FrozenInstanceError
 
 import pytest
 
@@ -40,7 +41,7 @@ def test_event_dataclasses_are_frozen():
     assert word.word == "hi"
     assert flushed.at_seconds == 1.5
     assert err.recoverable is False
-    with pytest.raises(Exception):
+    with pytest.raises(FrozenInstanceError):
         chunk.audio = b"new"  # frozen
 
 
@@ -67,8 +68,11 @@ def test_capability_protocols_are_runtime_checkable():
             raise NotImplementedError
 
     assert not isinstance(_BatchOnly(), StreamingTTSCapability)
+    assert not isinstance(_BatchOnly(), BidirectionalTTSCapability)
     assert isinstance(_Streaming(), StreamingTTSCapability)
+    assert not isinstance(_Streaming(), BidirectionalTTSCapability)
     assert isinstance(_Bidirectional(), BidirectionalTTSCapability)
+    assert not isinstance(_Bidirectional(), StreamingTTSCapability)
     # Provider protocols mirror the capability shape on the service side.
     assert isinstance(_Streaming(), StreamingTTSProvider)
     assert isinstance(_Bidirectional(), BidirectionalTTSProvider)

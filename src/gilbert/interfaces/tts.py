@@ -237,7 +237,12 @@ class TTSStream(ABC):
     async def close(self) -> None: ...
 
     @abstractmethod
-    def events(self) -> AsyncIterator[TTSEvent]: ...
+    def events(self) -> AsyncIterator[TTSEvent]:
+        """Yield TTSEvents as they arrive. Implement as an
+        async generator (``async def events(self): yield …``);
+        the method itself is a synchronous ``def`` that returns
+        the generator, matching ``TranscriptionStream.events``."""
+        ...
 
 
 @runtime_checkable
