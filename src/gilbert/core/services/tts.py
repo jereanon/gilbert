@@ -111,6 +111,10 @@ class TTSService(Service):
         # WS streaming sessions, keyed by session_id (UUID hex).
         self._sessions: dict[str, _ActiveTTSSession] = {}
         self._sessions_guard = asyncio.Lock()
+        # Strong refs for fire-and-forget cleanup tasks scheduled
+        # from sync close callbacks. Without these, the GC may
+        # discard the Task before _close_session finishes.
+        self._cleanup_tasks: set[asyncio.Task[None]] = set()
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
@@ -487,7 +491,9 @@ class TTSService(Service):
                 self._sessions[session_id] = record
 
             def _on_close(sid: str = session_id) -> None:
-                asyncio.create_task(self._close_session(sid))
+                t = asyncio.create_task(self._close_session(sid))
+                self._cleanup_tasks.add(t)
+                t.add_done_callback(self._cleanup_tasks.discard)
 
             conn.add_close_callback(_on_close)
 
@@ -516,6 +522,9 @@ class TTSService(Service):
             # immediately if the backend doesn't support streaming.
             chunk_iter = self.synthesize_stream(request)
             async for chunk in chunk_iter:
+                # synthesize_stream yields raw bytes; wrap as TTSAudioChunk so
+                # the wire frame format matches the bidirectional path (which
+                # already emits TTSAudioChunk events from the primitive).
                 conn.enqueue({
                     "type": "tts.event",
                     "session_id": rec.session_id,
