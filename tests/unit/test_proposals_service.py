@@ -325,6 +325,9 @@ def resolver(
 @pytest.fixture
 async def started_service(resolver: FakeResolver) -> ProposalsService:
     svc = ProposalsService()
+    # Service defaults to disabled; flip it on before start() so the
+    # scheduler-job registration and storage wiring actually happen.
+    svc._enabled = True
     await svc.start(resolver)
     return svc
 
@@ -452,7 +455,7 @@ class TestObservation:
         self, resolver: FakeResolver, fake_storage: FakeStorage
     ) -> None:
         svc = ProposalsService()
-        await svc.on_config_changed({"observation_flush_threshold": 2})
+        await svc.on_config_changed({"observation_flush_threshold": 2, "enabled": True})
         await svc.start(resolver)
         for i in range(2):
             await svc._on_event(
@@ -558,7 +561,7 @@ class TestBuildRecord:
         self, resolver: FakeResolver
     ) -> None:
         svc = ProposalsService()
-        await svc.on_config_changed({"allow_core_modifications": True})
+        await svc.on_config_changed({"allow_core_modifications": True, "enabled": True})
         await svc.start(resolver)
         blob = _valid_proposal_blob("Refactor service manager")
         blob["kind"] = "modify_core"
@@ -621,6 +624,7 @@ class TestReflectionHappyPath:
         ai_payload = json.dumps({"proposals": [_valid_proposal_blob("Plugin A")]})
         resolver.caps["ai_chat"] = FakeAI(content=ai_payload)
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
 
         created = await svc.trigger_reflection()
@@ -640,7 +644,7 @@ class TestReflectionHappyPath:
         many = [_valid_proposal_blob(f"Plugin {i}") for i in range(20)]
         resolver.caps["ai_chat"] = FakeAI(content=json.dumps({"proposals": many}))
         svc = ProposalsService()
-        await svc.on_config_changed({"max_proposals_per_cycle": 2})
+        await svc.on_config_changed({"max_proposals_per_cycle": 2, "enabled": True})
         await svc.start(resolver)
 
         created = await svc.trigger_reflection()
@@ -654,6 +658,7 @@ class TestReflectionHappyPath:
             content=json.dumps({"proposals": [bad, good]}),
         )
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
         created = await svc.trigger_reflection()
         assert created == 1
@@ -665,7 +670,7 @@ class TestPruning:
         self, resolver: FakeResolver, fake_storage: FakeStorage
     ) -> None:
         svc = ProposalsService()
-        await svc.on_config_changed({"observation_cap_total": 100})
+        await svc.on_config_changed({"observation_cap_total": 100, "enabled": True})
         await svc.start(resolver)
 
         # Seed 105 observations directly into storage with ascending
@@ -771,6 +776,7 @@ class TestConversationHarvest:
             )
         )
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
 
         created = await svc.trigger_harvest()
@@ -802,6 +808,7 @@ class TestConversationHarvest:
             )
         )
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
 
         await svc.trigger_harvest()
@@ -843,6 +850,7 @@ class TestConversationHarvest:
         fake_ai = FakeAI(content=json.dumps({"observations": []}))
         resolver.caps["ai_chat"] = fake_ai
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
 
         await svc.trigger_harvest()
@@ -868,7 +876,7 @@ class TestConversationHarvest:
         fake_ai = FakeAI(content=json.dumps({"observations": []}))
         resolver.caps["ai_chat"] = fake_ai
         svc = ProposalsService()
-        await svc.on_config_changed({"harvest_max_conversations_per_cycle": 2})
+        await svc.on_config_changed({"harvest_max_conversations_per_cycle": 2, "enabled": True})
         await svc.start(resolver)
 
         await svc.trigger_harvest()
@@ -902,6 +910,7 @@ class TestArchiveEventExtraction:
 
         resolver.caps["ai_chat"] = SlowAI()
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
 
         # Time the handler — it should return well before the AI call
@@ -945,6 +954,7 @@ class TestArchiveEventExtraction:
             )
         )
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
 
         await svc._on_chat_archiving(
@@ -994,6 +1004,7 @@ class TestReflectionConsumption:
             )
         resolver.caps["ai_chat"] = FakeAI(content='{"proposals": []}')
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
         await svc.trigger_reflection()
 
@@ -1021,7 +1032,7 @@ class TestReflectionConsumption:
         fake_ai = FakeAI(content='{"proposals": []}')
         resolver.caps["ai_chat"] = fake_ai
         svc = ProposalsService()
-        await svc.on_config_changed({"min_observations_per_cycle": 5})
+        await svc.on_config_changed({"min_observations_per_cycle": 5, "enabled": True})
         await svc.start(resolver)
 
         await svc._run_reflection(manual=False)
@@ -1054,6 +1065,7 @@ class TestBackgroundTrigger:
 
         resolver.caps["ai_chat"] = SlowAI()
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
 
         loop = _asyncio.get_event_loop()
@@ -1088,6 +1100,7 @@ class TestBackgroundTrigger:
 
         resolver.caps["ai_chat"] = SlowAI()
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
 
         first = svc.start_reflection_in_background()
@@ -1113,6 +1126,7 @@ class TestBackgroundTrigger:
     ) -> None:
         resolver.caps["ai_chat"] = FakeAI(content='{"proposals": []}')
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
         await svc.trigger_reflection()
         types = [e.event_type for e in fake_bus.published]
@@ -1243,6 +1257,7 @@ class TestCyclePersistence:
         ai_payload = json.dumps({"proposals": [_valid_proposal_blob("X")]})
         resolver.caps["ai_chat"] = FakeAI(content=ai_payload)
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
 
         await svc.trigger_reflection()
@@ -1263,6 +1278,7 @@ class TestCyclePersistence:
         fake_storage: FakeStorage,
     ) -> None:
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
         for i in range(svc._max_pending_proposals):
             await fake_storage.put(
@@ -1290,6 +1306,7 @@ class TestCyclePersistence:
 
         resolver.caps["ai_chat"] = BoomAI()
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
         await svc.trigger_reflection()
 
@@ -1311,6 +1328,7 @@ class TestCyclePersistence:
         r.caps["event_bus"] = FakeBusProvider(fake_bus)
         r.caps["scheduler"] = fake_scheduler
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(r)
 
         # Seed a conversation so the harvest at least gets to the
@@ -1411,6 +1429,7 @@ class TestNewWsHandlers:
         self, resolver: FakeResolver
     ) -> None:
         svc = ProposalsService()
+        svc._enabled = True
         await svc.start(resolver)
         admin = _fake_conn(user_level=0)
         result = await svc._ws_trigger_harvest(admin, {"id": "f1"})

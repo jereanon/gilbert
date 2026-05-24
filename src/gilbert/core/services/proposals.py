@@ -336,7 +336,7 @@ class ProposalsService(Service):
     _DEFAULT_MIN_OBSERVATIONS_PER_CYCLE = 25
     _DEFAULT_MAX_PENDING_PROPOSALS = 10
     _DEFAULT_AI_PROFILE = "advanced"
-    _DEFAULT_ENABLED = True
+    _DEFAULT_ENABLED = False
     # Off by default: changes inside ``src/gilbert/`` carry more risk
     # than a new plugin and must be opted into by the operator. When
     # this is False, the reflection AI is told it must not emit

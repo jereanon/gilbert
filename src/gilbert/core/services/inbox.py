@@ -262,7 +262,7 @@ class InboxService(Service):
                     )
                 )
 
-        self._enabled = bool(section.get("enabled", True))
+        self._enabled = bool(section.get("enabled", False))
         if not self._enabled:
             logger.info("Inbox service disabled via configuration")
             return

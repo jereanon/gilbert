@@ -603,7 +603,12 @@ class Gilbert:
         - Row exists with ``enabled=True``  → load (return True)
         - Row exists with ``enabled=False`` → skip (return False)
         - Row absent (first time seen)       → create row with
-          ``enabled=False``, ``first_seen_at=now``, then skip
+          ``enabled=True``, ``first_seen_at=now``, then load
+
+        A newly-discovered plugin's UI panels, settings page, and
+        services all become available on the same boot — but any
+        toggleable service the plugin registers still defaults to OFF
+        and must be opted in from ``/settings → Services``.
 
         When storage is unavailable the method returns True so that a
         fresh install (no DB yet) loads all plugins normally.
@@ -640,7 +645,7 @@ class Gilbert:
                 {
                     "_id": name,
                     "name": name,
-                    "enabled": False,
+                    "enabled": True,
                     "first_seen_at": now,
                 },
             )
@@ -652,11 +657,10 @@ class Gilbert:
             return True
 
         logger.info(
-            "New plugin discovered: %s — defaulting to disabled. "
-            "Enable it via the Plugins settings page and restart.",
+            "New plugin discovered: %s — defaulting to enabled.",
             name,
         )
-        return False
+        return True
 
     async def _load_plugins(self) -> None:
         """Load plugins from discovered manifests and explicit sources.

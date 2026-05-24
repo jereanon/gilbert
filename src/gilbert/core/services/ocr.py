@@ -54,7 +54,7 @@ class OCRService(Service):
             if isinstance(config_svc, ConfigurationReader):
                 section = config_svc.get_section("ocr")
 
-        if not section.get("enabled", True):
+        if not section.get("enabled", False):
             logger.info("OCR service disabled")
             return
 

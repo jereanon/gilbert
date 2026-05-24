@@ -1,7 +1,7 @@
-"""Unit tests for the plugin default-disabled feature in Gilbert._load_plugins.
+"""Unit tests for the plugin default-enabled feature in Gilbert._load_plugins.
 
 Tests cover:
-- New plugin (no state row) → row created with enabled=False, setup() NOT called.
+- New plugin (no state row) → row created with enabled=True, setup() called.
 - Existing plugin with enabled=True row → setup() called normally.
 - Existing plugin with enabled=False row → setup() NOT called.
 - Storage unavailable → all plugins load normally (safe fallback).
@@ -119,16 +119,16 @@ async def _check(
 
 class TestCheckPluginEnabled:
     @pytest.mark.asyncio
-    async def test_new_plugin_creates_row_and_returns_false(self) -> None:
+    async def test_new_plugin_creates_row_and_returns_true(self) -> None:
         storage = _FakeStorageBackend()
 
         result = await _check(storage, "my-plugin")
 
-        assert result is False
+        assert result is True
         # Row should be created
         row = await storage.get(_STATE_COLLECTION, "my-plugin")
         assert row is not None
-        assert row["enabled"] is False
+        assert row["enabled"] is True
         assert row["name"] == "my-plugin"
         assert "first_seen_at" in row
 
