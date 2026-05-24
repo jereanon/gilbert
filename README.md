@@ -78,6 +78,8 @@ At minimum, before Gilbert is useful, open the Settings UI and configure:
 
 On first run, Gilbert creates the `.gilbert/` directory and initializes the SQLite database, log files, and default AI profiles. The web UI is available at `http://localhost:8000` — log in as `root` with the password you set under `auth.root_password` in `.gilbert/config.yaml` (see [Configure](#configure)), then head to **Security → Users** to add more accounts.
 
+Gilbert also serves HTTPS on `https://localhost:8443` using a self-signed certificate auto-generated on first boot under `.gilbert/credentials/tls.{crt,key}`. The HTTPS listener is what unlocks browser features that require a secure context — notably `getUserMedia` for the voice agent and any other mic/camera-driven flow. Open `/setup-https` for the cert download and per-OS install steps so phones and other LAN browsers can trust it. Disable by setting `web.tls.enabled: false` in `.gilbert/config.yaml` if you terminate TLS elsewhere.
+
 ## Multi-User & Access Control
 
 Gilbert is designed for households and small teams, not a single desktop user. Every request — whether from the web UI, a Slack DM, a chat with the AI, or an external MCP client — is attributed to a specific user and passed through a consistent authorization layer.
