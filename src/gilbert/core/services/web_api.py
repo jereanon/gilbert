@@ -511,6 +511,14 @@ class WebApiService(Service):
         #     binding to a route.
         _merge_plugin_nav(gilbert, nav_groups)
 
+        # Pin the System group to the last position. Plugin-contributed
+        # top-level groups are appended by ``_merge_plugin_nav``, which
+        # would otherwise push System above them.
+        for i, g in enumerate(nav_groups):
+            if g.get("key") == "system":
+                nav_groups.append(nav_groups.pop(i))
+                break
+
         acl = gilbert.service_manager.get_by_capability("access_control")
         sm = gilbert.service_manager
 
