@@ -73,6 +73,32 @@ Scan imports in each layer and flag:
 - **Direct instantiation of backend classes** (e.g., `ElevenLabsTTS()`) outside `app.py`. Must go through `Backend.registered_backends().get("name")`.
 - **Direct import of concrete backends** from `integrations/` outside `app.py` or side-effect registration imports.
 
+### 2b. Protocol Surface Completeness
+
+A service that implements PART of a `@runtime_checkable Protocol` from `interfaces/` but not the whole thing is silently filtered out by `isinstance(svc, Protocol)` checks. Voice-agent shipped a regression exactly this way: it declared `config_namespace` + `config_category` and set `toggleable=True` on its `ServiceInfo`, but never implemented `config_params()` / `on_config_changed()`. `isinstance(svc, Configurable)` returned False, the `_build_categories` walk in `configuration.py` skipped it, and the Settings → Services toggle silently never appeared even though the plugin loaded and the service registered.
+
+Audit:
+
+1. For every `class … (Service)` declaration in `src/gilbert/core/services/`, `std-plugins/*/`, `local-plugins/*/`: if the class defines ANY of `config_namespace`, `config_category`, `config_params`, `on_config_changed`, it MUST define ALL FOUR.
+
+   ```bash
+   grep -rln "def config_namespace\|def config_params\|def config_category\|on_config_changed" \
+       src/gilbert/core/services/ std-plugins/*/*.py local-plugins/*/*.py 2>/dev/null \
+   | while read f; do
+       ns=$(grep -c "def config_namespace" "$f")
+       cat=$(grep -c "def config_category" "$f")
+       p=$(grep -c "def config_params" "$f")
+       o=$(grep -c "on_config_changed" "$f")
+       if [ "$ns" -gt 0 ] || [ "$cat" -gt 0 ] || [ "$p" -gt 0 ] || [ "$o" -gt 0 ]; then
+         [ "$ns" -gt 0 ] && [ "$cat" -gt 0 ] && [ "$p" -gt 0 ] && [ "$o" -gt 0 ] || echo "PARTIAL Configurable: $f"
+       fi
+   done
+   ```
+
+2. If `service_info()` returns `ServiceInfo(toggleable=True, …)`, the class MUST also satisfy the full `Configurable` Protocol — otherwise the toggle never appears in Settings → Services and the user can't enable the service from the UI.
+
+Same shape applies to other partial-Protocol traps: `ToolProvider` (`tool_provider_name` + `get_tools` + `execute_tool` must all be present), `WsHandlerProvider`, `ConfigActionProvider`, etc. If you see one method of a Protocol's surface but not its siblings, that's the smell.
+
 ### 3. Duck-Typing and Private Access
 
 - **`getattr(obj, "method", …)`** to probe service capabilities — must be an `isinstance` check against the appropriate `@runtime_checkable Protocol`.
