@@ -453,13 +453,9 @@ class TTSService(Service):
     async def _handle_start_stream(
         self, conn: Any, frame: dict[str, Any],
     ) -> dict[str, Any]:
-        """Open a TTS stream session. Returns ``{"session_id": "..."}``.
-
-        Pump runs in the background; audio events arrive as server-pushed
-        ``tts.event`` frames. Capability errors are reported via a
-        server-pushed ``error`` event after the session is opened so the
-        SPA's event-handling code path stays uniform.
-        """
+        """Open a TTS stream session. Mode is ``oneshot`` (text in frame,
+        audio out via tts.event) or ``bidirectional`` (push text via
+        tts.send_text and tts.flush, audio out via tts.event)."""
         import contextvars
 
         mode = frame.get("mode", "oneshot")
@@ -467,7 +463,7 @@ class TTSService(Service):
         voice_id = str(frame.get("voice_id", ""))
         speed = float(frame.get("speed", 1.0))
         context = str(frame.get("context", ""))
-
+        sample_rate = int(frame.get("sample_rate", 44100))
         session_id = uuid.uuid4().hex
 
         if mode == "oneshot":
@@ -490,12 +486,12 @@ class TTSService(Service):
             async with self._sessions_guard:
                 self._sessions[session_id] = record
 
-            def _on_close(sid: str = session_id) -> None:
+            def _on_close_oneshot(sid: str = session_id) -> None:
                 t = asyncio.create_task(self._close_session(sid))
                 self._cleanup_tasks.add(t)
                 t.add_done_callback(self._cleanup_tasks.discard)
 
-            conn.add_close_callback(_on_close)
+            conn.add_close_callback(_on_close_oneshot)
 
             ctx = contextvars.copy_context()
             record.pump_task = asyncio.create_task(
@@ -505,7 +501,40 @@ class TTSService(Service):
             )
             return {"session_id": session_id}
 
-        # "bidirectional" branch added in Task 6.
+        if mode == "bidirectional":
+            cfg = TTSStreamConfig(
+                voice_id=voice_id, output_format=fmt, speed=speed,
+                context=context, sample_rate=sample_rate,
+            )
+            try:
+                primitive = await self.open_stream(cfg)
+            except TTSCapabilityError as e:
+                return {"ok": False, "error": str(e)}
+            record = _ActiveTTSSession(
+                session_id=session_id,
+                conn_id=conn.connection_id,
+                user_id=conn.user_id or "",
+                mode=mode,
+                fmt=fmt,
+                primitive=primitive,
+            )
+            async with self._sessions_guard:
+                self._sessions[session_id] = record
+
+            def _on_close_bidi(sid: str = session_id) -> None:
+                t = asyncio.create_task(self._close_session(sid))
+                self._cleanup_tasks.add(t)
+                t.add_done_callback(self._cleanup_tasks.discard)
+
+            conn.add_close_callback(_on_close_bidi)
+            ctx = contextvars.copy_context()
+            record.pump_task = asyncio.create_task(
+                self._pump_bidirectional(conn, record),
+                name=f"tts-pump-bidi-{session_id}",
+                context=ctx,
+            )
+            return {"session_id": session_id}
+
         return {"ok": False, "error": f"unknown stream mode {mode!r}"}
 
     async def _pump_oneshot(
@@ -568,18 +597,55 @@ class TTSService(Service):
             except Exception:  # noqa: BLE001
                 logger.exception("error closing TTS primitive for session %s", session_id)
 
-    # Stubs filled in by Task 6; provide them now so get_ws_handlers
-    # can return a complete map.
+    async def _pump_bidirectional(self, conn: Any, rec: _ActiveTTSSession) -> None:
+        """Drain ``primitive.events()`` and push ``tts.event`` frames.
+        Cleanup happens via ``_close_session`` (on socket drop or explicit
+        close), not here — the pump just relays events."""
+        assert rec.primitive is not None
+        try:
+            async for ev in rec.primitive.events():
+                conn.enqueue({
+                    "type": "tts.event",
+                    "session_id": rec.session_id,
+                    "event": _event_to_json(ev, rec.fmt),
+                })
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("tts bidi pump error for session %s", rec.session_id)
+            conn.enqueue({
+                "type": "tts.event",
+                "session_id": rec.session_id,
+                "event": {"type": "error", "message": str(e), "recoverable": False},
+            })
 
     async def _handle_send_text(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
-        return {"ok": False, "error": "bidirectional mode not yet implemented"}
+        sid = frame.get("session_id")
+        text = frame.get("text")
+        if not isinstance(sid, str) or not isinstance(text, str):
+            return {"ok": False, "error": "missing session_id or text"}
+        rec = self._sessions.get(sid)
+        if rec is None or rec.conn_id != conn.connection_id or rec.primitive is None:
+            return {"ok": False, "error": "unknown session"}
+        await rec.primitive.send_text(text)
+        return {"ok": True}
 
     async def _handle_flush(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
-        return {"ok": False, "error": "bidirectional mode not yet implemented"}
+        sid = frame.get("session_id")
+        if not isinstance(sid, str):
+            return {"ok": False, "error": "missing session_id"}
+        rec = self._sessions.get(sid)
+        if rec is None or rec.conn_id != conn.connection_id or rec.primitive is None:
+            return {"ok": False, "error": "unknown session"}
+        await rec.primitive.flush()
+        return {"ok": True}
 
     async def _handle_close_stream(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
         sid = frame.get("session_id")
         if not isinstance(sid, str):
             return {"ok": False, "error": "missing session_id"}
+        rec = self._sessions.get(sid)
+        if rec is not None and rec.conn_id != conn.connection_id:
+            return {"ok": False, "error": "unknown session"}
         await self._close_session(sid)
         return {"ok": True}
