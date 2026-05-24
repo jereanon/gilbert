@@ -195,6 +195,9 @@ asyncio_mode = "auto"
 # would import all of them as ``tests.conftest`` and collide on the
 # second one.
 addopts = "--import-mode=importlib"
+markers = [
+    "slow: marks tests as slow (run only with '-m slow', skip with '-m \"not slow\"')",
+]
 
 [tool.mypy]
 python_version = "3.12"
