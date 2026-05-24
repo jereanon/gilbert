@@ -486,12 +486,7 @@ class TTSService(Service):
             async with self._sessions_guard:
                 self._sessions[session_id] = record
 
-            def _on_close_oneshot(sid: str = session_id) -> None:
-                t = asyncio.create_task(self._close_session(sid))
-                self._cleanup_tasks.add(t)
-                t.add_done_callback(self._cleanup_tasks.discard)
-
-            conn.add_close_callback(_on_close_oneshot)
+            conn.add_close_callback(lambda sid=session_id: self._schedule_session_cleanup(sid))
 
             ctx = contextvars.copy_context()
             record.pump_task = asyncio.create_task(
@@ -521,12 +516,7 @@ class TTSService(Service):
             async with self._sessions_guard:
                 self._sessions[session_id] = record
 
-            def _on_close_bidi(sid: str = session_id) -> None:
-                t = asyncio.create_task(self._close_session(sid))
-                self._cleanup_tasks.add(t)
-                t.add_done_callback(self._cleanup_tasks.discard)
-
-            conn.add_close_callback(_on_close_bidi)
+            conn.add_close_callback(lambda sid=session_id: self._schedule_session_cleanup(sid))
             ctx = contextvars.copy_context()
             record.pump_task = asyncio.create_task(
                 self._pump_bidirectional(conn, record),
@@ -582,6 +572,17 @@ class TTSService(Service):
         finally:
             async with self._sessions_guard:
                 self._sessions.pop(rec.session_id, None)
+
+    def _schedule_session_cleanup(self, session_id: str) -> None:
+        """Sync entry point for ``WsConnection.add_close_callback``.
+
+        Schedules ``_close_session`` as a tracked background task so the
+        GC can't drop the Task mid-execution. The task is removed from
+        ``_cleanup_tasks`` on completion via ``add_done_callback``.
+        """
+        t = asyncio.create_task(self._close_session(session_id))
+        self._cleanup_tasks.add(t)
+        t.add_done_callback(self._cleanup_tasks.discard)
 
     async def _close_session(self, session_id: str) -> None:
         """Tear down a session: cancel pump, close primitive, drop record."""
