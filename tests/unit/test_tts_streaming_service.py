@@ -105,3 +105,90 @@ async def test_synthesize_stream_raises_when_backend_none():
     req = SynthesisRequest(text="hi", voice_id="v1", output_format=AudioFormat.MP3)
     with pytest.raises(RuntimeError, match="TTS service is not enabled"):
         svc.synthesize_stream(req)
+
+
+from gilbert.interfaces.tts import BidirectionalTTSCapability, TTSStream, TTSStreamConfig
+
+
+class _FakeBidirectionalStream(TTSStream):
+    def __init__(self):
+        self.sent: list[str] = []
+        self.flushed = 0
+        self.closed = False
+
+    async def send_text(self, text: str) -> None:
+        self.sent.append(text)
+
+    async def flush(self) -> None:
+        self.flushed += 1
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def events(self) -> AsyncIterator:
+        async def _gen():
+            if False:
+                yield  # pragma: no cover — empty iterator
+        return _gen()
+
+
+class _BidirectionalBackend(_BatchOnlyBackend):
+    last_config: TTSStreamConfig | None = None
+
+    async def open_stream(self, config: TTSStreamConfig) -> TTSStream:
+        type(self).last_config = config
+        return _FakeBidirectionalStream()
+
+
+@pytest.fixture
+def svc_with_bidi() -> TTSService:
+    svc = TTSService()
+    svc._backend = _BidirectionalBackend()
+    svc._backend_name = "_bidi_test"
+    svc._enabled = True
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_open_stream_raises_when_backend_lacks_capability(svc_with_streaming):
+    # _StreamingBackend implements streaming but NOT bidirectional.
+    cfg = TTSStreamConfig(voice_id="v1")
+    with pytest.raises(TTSCapabilityError) as ei:
+        await svc_with_streaming.open_stream(cfg)
+    assert "bidirectional" in str(ei.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_open_stream_returns_backend_stream(svc_with_bidi):
+    cfg = TTSStreamConfig(voice_id="v1", output_format=AudioFormat.PCM, sample_rate=8000)
+    stream = await svc_with_bidi.open_stream(cfg)
+    assert isinstance(stream, TTSStream)
+    assert _BidirectionalBackend.last_config == cfg
+
+
+@pytest.mark.asyncio
+async def test_open_stream_raises_when_backend_none():
+    svc = TTSService()
+    cfg = TTSStreamConfig(voice_id="v1")
+    with pytest.raises(RuntimeError, match="TTS service is not enabled"):
+        await svc.open_stream(cfg)
+
+
+def test_supported_capabilities_batch_only(svc_with_batch_only):
+    assert svc_with_batch_only.supported_capabilities() == frozenset({"batch"})
+
+
+def test_supported_capabilities_streaming(svc_with_streaming):
+    assert svc_with_streaming.supported_capabilities() == frozenset({"batch", "streaming"})
+
+
+def test_supported_capabilities_bidirectional(svc_with_bidi):
+    # _BidirectionalBackend inherits from _BatchOnlyBackend, so "streaming"
+    # is NOT present unless that class also adds synthesize_stream.
+    assert svc_with_bidi.supported_capabilities() == frozenset({"batch", "bidirectional"})
+
+
+def test_supported_capabilities_with_no_backend():
+    svc = TTSService()
+    # No backend loaded → empty set.
+    assert svc.supported_capabilities() == frozenset()

@@ -29,11 +29,14 @@ from gilbert.interfaces.tools import (
 )
 from gilbert.interfaces.tts import (
     AudioFormat,
+    BidirectionalTTSCapability,
     StreamingTTSCapability,
     SynthesisRequest,
     SynthesisResult,
     TTSBackend,
     TTSCapabilityError,
+    TTSStream,
+    TTSStreamConfig,
     Voice,
     append_silence,
 )
@@ -253,6 +256,35 @@ class TTSService(Service):
             )
         self._ensure_ai_injection()
         return self._backend.synthesize_stream(request)
+
+    async def open_stream(self, config: TTSStreamConfig) -> TTSStream:
+        """Open a bidirectional TTS session. Raises ``TTSCapabilityError``
+        if the active backend doesn't implement ``BidirectionalTTSCapability``."""
+        if self._backend is None:
+            raise RuntimeError("TTS service is not enabled")
+        if not isinstance(self._backend, BidirectionalTTSCapability):
+            raise TTSCapabilityError(
+                f"backend {self._backend_name!r} does not support bidirectional streaming"
+            )
+        self._ensure_ai_injection()
+        return await self._backend.open_stream(config)
+
+    def supported_capabilities(self) -> frozenset[str]:
+        """Report which TTS capabilities the active backend supports.
+
+        Returns ``frozenset()`` when no backend is loaded. Otherwise
+        always includes ``"batch"`` (every TTSBackend implements
+        ``synthesize``), plus ``"streaming"`` and/or ``"bidirectional"``
+        if the backend opts into the matching protocol.
+        """
+        if self._backend is None:
+            return frozenset()
+        caps = {"batch"}
+        if isinstance(self._backend, StreamingTTSCapability):
+            caps.add("streaming")
+        if isinstance(self._backend, BidirectionalTTSCapability):
+            caps.add("bidirectional")
+        return frozenset(caps)
 
     async def list_voices(self) -> list[Voice]:
         """List available voices from the backend."""
