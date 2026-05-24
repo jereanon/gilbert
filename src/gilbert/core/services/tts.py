@@ -4,10 +4,13 @@ Adds backend-agnostic silence padding to synthesized audio so speakers
 don't cut off the last word.
 """
 
+import asyncio
+import base64
 import json
 import logging
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 
 from gilbert.core.output import cleanup_old_files, get_output_dir
@@ -33,15 +36,59 @@ from gilbert.interfaces.tts import (
     StreamingTTSCapability,
     SynthesisRequest,
     SynthesisResult,
+    TTSAudioChunk,
     TTSBackend,
     TTSCapabilityError,
+    TTSFlushed,
     TTSStream,
     TTSStreamConfig,
+    TTSStreamError,
+    TTSWordTiming,
     Voice,
     append_silence,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _event_to_json(ev: object, fmt: AudioFormat) -> dict[str, Any]:
+    """Encode a ``TTSEvent`` for the WS wire.
+
+    Audio bytes are base64-encoded so the JSON frame stays text-safe.
+    The ``fmt`` argument is the session's output format, embedded on
+    audio frames so the SPA player knows how to decode."""
+    if isinstance(ev, TTSAudioChunk):
+        return {
+            "type": "audio",
+            "audio_b64": base64.b64encode(ev.audio).decode(),
+            "format": fmt.value,
+        }
+    if isinstance(ev, TTSWordTiming):
+        return {
+            "type": "word",
+            "word": ev.word,
+            "start_seconds": ev.start_seconds,
+            "end_seconds": ev.end_seconds,
+        }
+    if isinstance(ev, TTSFlushed):
+        return {"type": "flushed", "at_seconds": ev.at_seconds}
+    if isinstance(ev, TTSStreamError):
+        return {"type": "error", "message": ev.message, "recoverable": ev.recoverable}
+    return {"type": "unknown"}
+
+
+@dataclass
+class _ActiveTTSSession:
+    """Per-WS-connection TTS session state. Held only on
+    ``TTSService._sessions``, never as request-scoped attrs on ``self``."""
+
+    session_id: str
+    conn_id: str
+    user_id: str
+    mode: str                          # "oneshot" | "bidirectional"
+    fmt: AudioFormat                   # session's output format (used by _event_to_json)
+    primitive: TTSStream | None        # None for oneshot
+    pump_task: asyncio.Task[None] | None = None
 
 
 class TTSService(Service):
@@ -61,6 +108,9 @@ class TTSService(Service):
         # injection silently misses. We retry on every synthesize until
         # it sticks (or the backend signals it doesn't care).
         self._ai_injected: bool = False
+        # WS streaming sessions, keyed by session_id (UUID hex).
+        self._sessions: dict[str, _ActiveTTSSession] = {}
+        self._sessions_guard = asyncio.Lock()
 
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
