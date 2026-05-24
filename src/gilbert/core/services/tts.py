@@ -115,7 +115,7 @@ class TTSService(Service):
     def service_info(self) -> ServiceInfo:
         return ServiceInfo(
             name="tts",
-            capabilities=frozenset({"text_to_speech", "ai_tools"}),
+            capabilities=frozenset({"text_to_speech", "ai_tools", "ws_handlers"}),
             optional=frozenset({"configuration", "ai_chat"}),
             toggleable=True,
             toggle_description="Text-to-speech synthesis",
@@ -435,3 +435,142 @@ class TTSService(Service):
                 for v in voices
             ]
         )
+
+    # --- WsHandlerProvider --------------------------------------------
+
+    def get_ws_handlers(self) -> dict[str, Any]:
+        return {
+            "tts.start_stream":  self._handle_start_stream,
+            "tts.send_text":     self._handle_send_text,
+            "tts.flush":         self._handle_flush,
+            "tts.close_stream":  self._handle_close_stream,
+        }
+
+    async def _handle_start_stream(
+        self, conn: Any, frame: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Open a TTS stream session. Returns ``{"session_id": "..."}``.
+
+        Pump runs in the background; audio events arrive as server-pushed
+        ``tts.event`` frames. Capability errors are reported via a
+        server-pushed ``error`` event after the session is opened so the
+        SPA's event-handling code path stays uniform.
+        """
+        import contextvars
+
+        mode = frame.get("mode", "oneshot")
+        fmt = AudioFormat(frame.get("format", "mp3"))
+        voice_id = str(frame.get("voice_id", ""))
+        speed = float(frame.get("speed", 1.0))
+        context = str(frame.get("context", ""))
+
+        session_id = uuid.uuid4().hex
+
+        if mode == "oneshot":
+            text = str(frame.get("text", ""))
+            request = SynthesisRequest(
+                text=text,
+                voice_id=voice_id,
+                output_format=fmt,
+                speed=speed,
+                context=context,
+            )
+            record = _ActiveTTSSession(
+                session_id=session_id,
+                conn_id=conn.connection_id,
+                user_id=conn.user_id or "",
+                mode=mode,
+                fmt=fmt,
+                primitive=None,
+            )
+            async with self._sessions_guard:
+                self._sessions[session_id] = record
+
+            def _on_close(sid: str = session_id) -> None:
+                asyncio.create_task(self._close_session(sid))
+
+            conn.add_close_callback(_on_close)
+
+            ctx = contextvars.copy_context()
+            record.pump_task = asyncio.create_task(
+                self._pump_oneshot(conn, record, request),
+                name=f"tts-pump-oneshot-{session_id}",
+                context=ctx,
+            )
+            return {"session_id": session_id}
+
+        # "bidirectional" branch added in Task 6.
+        return {"ok": False, "error": f"unknown stream mode {mode!r}"}
+
+    async def _pump_oneshot(
+        self,
+        conn: Any,
+        rec: _ActiveTTSSession,
+        request: SynthesisRequest,
+    ) -> None:
+        """Drain the backend's chunk iterator, emit ``tts.event`` frames,
+        then a single ``end`` event. Capability errors become a single
+        ``error`` event. Always cleans up the session record."""
+        try:
+            # synthesize_stream is a sync call that raises TTSCapabilityError
+            # immediately if the backend doesn't support streaming.
+            chunk_iter = self.synthesize_stream(request)
+            async for chunk in chunk_iter:
+                conn.enqueue({
+                    "type": "tts.event",
+                    "session_id": rec.session_id,
+                    "event": _event_to_json(TTSAudioChunk(audio=chunk), rec.fmt),
+                })
+            conn.enqueue({
+                "type": "tts.event",
+                "session_id": rec.session_id,
+                "event": {"type": "end"},
+            })
+        except TTSCapabilityError as e:
+            conn.enqueue({
+                "type": "tts.event",
+                "session_id": rec.session_id,
+                "event": {"type": "error", "message": str(e), "recoverable": False},
+            })
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("tts oneshot pump error for session %s", rec.session_id)
+            conn.enqueue({
+                "type": "tts.event",
+                "session_id": rec.session_id,
+                "event": {"type": "error", "message": str(e), "recoverable": False},
+            })
+        finally:
+            async with self._sessions_guard:
+                self._sessions.pop(rec.session_id, None)
+
+    async def _close_session(self, session_id: str) -> None:
+        """Tear down a session: cancel pump, close primitive, drop record."""
+        async with self._sessions_guard:
+            rec = self._sessions.pop(session_id, None)
+        if rec is None:
+            return
+        if rec.pump_task is not None and not rec.pump_task.done():
+            rec.pump_task.cancel()
+        if rec.primitive is not None:
+            try:
+                await rec.primitive.close()
+            except Exception:  # noqa: BLE001
+                logger.exception("error closing TTS primitive for session %s", session_id)
+
+    # Stubs filled in by Task 6; provide them now so get_ws_handlers
+    # can return a complete map.
+
+    async def _handle_send_text(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": False, "error": "bidirectional mode not yet implemented"}
+
+    async def _handle_flush(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": False, "error": "bidirectional mode not yet implemented"}
+
+    async def _handle_close_stream(self, conn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        sid = frame.get("session_id")
+        if not isinstance(sid, str):
+            return {"ok": False, "error": "missing session_id"}
+        await self._close_session(sid)
+        return {"ok": True}
