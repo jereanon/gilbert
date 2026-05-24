@@ -16,6 +16,7 @@ import { TasksPage } from "@/components/tasks/TasksPage";
 import { RolesPage } from "@/components/roles/RolesPage";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { SystemPage } from "@/components/system/SystemPage";
+import { SetupHttpsPage } from "@/components/system/SetupHttpsPage";
 import { ScreensPage } from "@/components/screens/ScreensPage";
 import { SchedulerPage } from "@/components/scheduler/SchedulerPage";
 import { PluginsPage } from "@/components/plugins/PluginsPage";
@@ -41,6 +42,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/auth/login" element={<LoginPage />} />
+      <Route path="/setup-https" element={<SetupHttpsPage />} />
       <Route element={<ProtectedRoute />}>
         <Route element={<AppShell />}>
           <Route path="/" element={<DashboardPage />} />
