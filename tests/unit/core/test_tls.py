@@ -1,18 +1,15 @@
 """Tests for gilbert.core.tls — self-signed certificate generation."""
 from __future__ import annotations
 
-import os
-import socket
 import stat
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 from gilbert.core.tls import CertInfo, ensure_self_signed_cert
 
@@ -54,6 +51,7 @@ def test_san_includes_localhost_and_loopback_ips(cert_paths: tuple[Path, Path]) 
 def test_san_includes_hostname_and_outbound_ip(cert_paths: tuple[Path, Path]) -> None:
     cert_path, key_path = cert_paths
     with patch("gilbert.core.tls.socket.gethostname", return_value="test-host"), \
+         patch("gilbert.core.tls.socket.getaddrinfo", return_value=[]), \
          patch("gilbert.core.tls._detect_outbound_ip", return_value="192.168.1.42"):
         ensure_self_signed_cert(cert_path, key_path)
     cert = _load_cert(cert_path)
@@ -102,21 +100,21 @@ def test_regenerates_when_cert_near_expiry(cert_paths: tuple[Path, Path]) -> Non
     # same key (so the regen path can tell "valid PEM, expiring soon").
     ensure_self_signed_cert(cert_path, key_path)
     key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
-    soon = datetime.now(timezone.utc) + timedelta(days=3)
+    soon = datetime.now(UTC) + timedelta(days=3)
     near_expiry = (
         x509.CertificateBuilder()
         .subject_name(x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "x")]))
         .issuer_name(x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "x")]))
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.now(timezone.utc) - timedelta(days=1))
+        .not_valid_before(datetime.now(UTC) - timedelta(days=1))
         .not_valid_after(soon)
         .sign(key, hashes.SHA256())
     )
     cert_path.write_bytes(near_expiry.public_bytes(serialization.Encoding.PEM))
     info = ensure_self_signed_cert(cert_path, key_path)
     # Should have regenerated — new cert valid for ~10 years.
-    assert info.not_valid_after > datetime.now(timezone.utc) + timedelta(days=365 * 9)
+    assert info.not_valid_after > datetime.now(UTC) + timedelta(days=365 * 9)
 
 
 def test_regenerates_when_cert_corrupt(cert_paths: tuple[Path, Path]) -> None:
@@ -124,7 +122,7 @@ def test_regenerates_when_cert_corrupt(cert_paths: tuple[Path, Path]) -> None:
     cert_path.write_bytes(b"not a certificate")
     key_path.write_bytes(b"not a key")
     info = ensure_self_signed_cert(cert_path, key_path)
-    assert info.not_valid_after > datetime.now(timezone.utc) + timedelta(days=365 * 9)
+    assert info.not_valid_after > datetime.now(UTC) + timedelta(days=365 * 9)
     # Files were rewritten with parseable content.
     _load_cert(cert_path)
 
@@ -132,20 +130,19 @@ def test_regenerates_when_cert_corrupt(cert_paths: tuple[Path, Path]) -> None:
 def test_atomic_write_preserves_original_on_crash(cert_paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch) -> None:
     cert_path, key_path = cert_paths
     # Place a known-good cert first.
-    info_original = ensure_self_signed_cert(cert_path, key_path)
-    original_bytes = cert_path.read_bytes()
+    ensure_self_signed_cert(cert_path, key_path)
 
     # Force a near-expiry to trigger regen on the next call, then
     # crash inside the write path.
     key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
-    soon = datetime.now(timezone.utc) + timedelta(days=3)
+    soon = datetime.now(UTC) + timedelta(days=3)
     short = (
         x509.CertificateBuilder()
         .subject_name(x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "x")]))
         .issuer_name(x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "x")]))
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.now(timezone.utc) - timedelta(days=1))
+        .not_valid_before(datetime.now(UTC) - timedelta(days=1))
         .not_valid_after(soon)
         .sign(key, hashes.SHA256())
     )
@@ -169,7 +166,7 @@ def test_atomic_write_preserves_original_on_crash(cert_paths: tuple[Path, Path],
 def test_cert_validity_is_ten_years(cert_paths: tuple[Path, Path]) -> None:
     cert_path, key_path = cert_paths
     info = ensure_self_signed_cert(cert_path, key_path)
-    delta = info.not_valid_after - datetime.now(timezone.utc)
+    delta = info.not_valid_after - datetime.now(UTC)
     # 10 years, with a day of slop.
     assert timedelta(days=365 * 10 - 2) <= delta <= timedelta(days=365 * 10 + 2)
 

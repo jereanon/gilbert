@@ -173,7 +173,6 @@ def _build_san_list() -> tuple[list[x509.GeneralName], list[str]]:
         dns_names.append(hostname)
         dns_names.append(f"{hostname}.local")
 
-    # Hostname-resolved addresses (whatever the OS thinks "this machine" is).
     try:
         for info in socket.getaddrinfo(hostname, None):
             try:
@@ -185,7 +184,6 @@ def _build_san_list() -> tuple[list[x509.GeneralName], list[str]]:
     except OSError:
         pass
 
-    # Primary outbound IP — what other LAN devices see when reaching us.
     outbound = _detect_outbound_ip()
     if outbound is not None:
         try:
@@ -194,15 +192,6 @@ def _build_san_list() -> tuple[list[x509.GeneralName], list[str]]:
                 ip_addrs.append(addr)
         except ValueError:
             pass
-
-    # Dedupe DNS names while preserving order.
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for n in dns_names:
-        if n not in seen:
-            seen.add(n)
-            deduped.append(n)
-    dns_names = deduped
 
     sans: list[x509.GeneralName] = [x509.DNSName(n) for n in dns_names]
     sans.extend(x509.IPAddress(a) for a in ip_addrs)
@@ -224,7 +213,7 @@ def _detect_outbound_ip() -> str | None:
 
 
 def _atomic_write(path: Path, content: bytes, *, mode: int) -> None:
-    """Write ``content`` to ``path`` atomically with the requested mode."""
+    """Leaves ``path`` unchanged if the write or rename fails."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
