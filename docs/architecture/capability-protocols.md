@@ -16,7 +16,9 @@ Services resolve dependencies via `resolver.get_capability("name")`, which retur
 | `AccessControlProvider` | `interfaces/auth.py` | `"access_control"` | `get_role_level()`, `get_effective_level()`, `resolve_rpc_level()` |
 | `SkillsProvider` | `interfaces/skills.py` | `"skills"` | `get_active_skills()`, `get_active_allowed_tools()`, `build_skills_context()` |
 | `PresenceProvider` | `interfaces/presence.py` | `"presence"` | `who_is_here()` |
-| `TTSProvider` | `interfaces/tts.py` | `"text_to_speech"` | `synthesize()` |
+| `TTSProvider` | `interfaces/tts.py` | `"text_to_speech"` | `synthesize()` — one-shot bytes-in, bytes-out. Always supported by `TTSBackend`. |
+| `StreamingTTSCapability` / `StreamingTTSProvider` | `interfaces/tts.py` | `"text_to_speech"` (same service) | `synthesize_stream()` — optional capability for one-shot text in, chunked audio out. Callers `isinstance`-check `StreamingTTSProvider` on the TTS service before consuming. Backends opt in by implementing the protocol; `kokoro` (sentence-split) and `elevenlabs` (HTTP streaming) currently do. |
+| `BidirectionalTTSCapability` / `BidirectionalTTSProvider` | `interfaces/tts.py` | `"text_to_speech"` (same service) | `open_stream(config) -> TTSStream` — optional capability for push-text / read-audio sessions over WebSocket (incremental `send_text` / `flush` / `close`). Callers `isinstance`-check `BidirectionalTTSProvider`. `elevenlabs` (stream-input WS) is the only current implementer. |
 | `AICapableTTSBackend` | `interfaces/tts.py` | (backend-injection) | `set_ai_sampling()` — TTS service injects `AISamplingProvider` after `initialize()` for backends that opt in (currently ElevenLabs, for v3 audio-tag injection). Mirrors `UserBackendAware` / `TunnelAwareAuthBackend` in auth. |
 | `AISamplingProvider` | `interfaces/ai.py` | `"ai_chat"` | `complete_one_shot()` — single-round, no conversation, no tool loop. Used for one-shot AI calls (sampling, tag injection). Backend + model are picked by `profile_name` (or the default backend when omitted). |
 | `TunnelProvider` | `interfaces/tunnel.py` | `"tunnel"` | `public_url` property |

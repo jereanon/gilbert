@@ -3,22 +3,21 @@
 import asyncio
 import base64
 from collections.abc import AsyncIterator
-from contextlib import suppress
 
 import pytest
 
 from gilbert.core.services.tts import TTSService, _event_to_json
 from gilbert.interfaces.tts import (
     AudioFormat,
-    StreamingTTSCapability,
     SynthesisRequest,
     SynthesisResult,
     TTSAudioChunk,
     TTSBackend,
     TTSFlushed,
+    TTSStream,
+    TTSStreamConfig,
     TTSStreamError,
     TTSWordTiming,
-    Voice,
 )
 
 
@@ -193,17 +192,6 @@ async def test_start_stream_oneshot_capability_error_emits_error_event_and_clean
 # Task 6: bidirectional mode + send_text / flush
 # ---------------------------------------------------------------------------
 
-import asyncio as _asyncio  # alias to avoid name clash in tests
-from collections.abc import AsyncIterator as _AsyncIter
-
-from gilbert.interfaces.tts import (
-    BidirectionalTTSCapability,
-    TTSAudioChunk,
-    TTSFlushed,
-    TTSStream,
-    TTSStreamConfig,
-)
-
 
 class _ScriptedTTSStream(TTSStream):
     """Records calls; emits a scripted event sequence on flush()."""
@@ -211,7 +199,7 @@ class _ScriptedTTSStream(TTSStream):
     def __init__(self):
         self.sent: list[str] = []
         self.closed = False
-        self._event_queue: _asyncio.Queue = _asyncio.Queue()
+        self._event_queue: asyncio.Queue = asyncio.Queue()
 
     async def send_text(self, text: str) -> None:
         self.sent.append(text)
@@ -225,7 +213,7 @@ class _ScriptedTTSStream(TTSStream):
         self.closed = True
         await self._event_queue.put(None)  # sentinel
 
-    def events(self) -> _AsyncIter:
+    def events(self) -> AsyncIterator:
         q = self._event_queue
 
         async def _gen():
@@ -278,7 +266,7 @@ async def test_start_stream_bidirectional_opens_session_and_pumps_events():
     await svc._handle_flush(conn, {"session_id": sid})
     # Drain at most 100 ms — enough for the pump to copy queued events.
     for _ in range(20):
-        await _asyncio.sleep(0.005)
+        await asyncio.sleep(0.005)
         if len([m for m in conn.enqueued if m.get("type") == "tts.event"]) >= 2:
             break
     events = [m for m in conn.enqueued if m.get("type") == "tts.event"]
@@ -329,8 +317,8 @@ async def test_close_session_on_socket_drop_cleans_up():
     # Fire the close callback (simulating socket drop).
     conn.close_cbs[0]()
     # Callback schedules an async cleanup; await it.
-    await _asyncio.sleep(0)
-    await _asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
     assert sid not in svc._sessions
 
 

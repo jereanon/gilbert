@@ -7,8 +7,6 @@ import pytest
 from gilbert.core.services.tts import TTSService
 from gilbert.interfaces.tts import (
     AudioFormat,
-    BidirectionalTTSCapability,
-    StreamingTTSCapability,
     SynthesisRequest,
     SynthesisResult,
     TTSBackend,
@@ -16,7 +14,6 @@ from gilbert.interfaces.tts import (
     TTSEvent,
     TTSStream,
     TTSStreamConfig,
-    Voice,
 )
 
 

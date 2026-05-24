@@ -11,7 +11,6 @@ from gilbert.interfaces.tts import (
     BidirectionalTTSProvider,
     StreamingTTSCapability,
     StreamingTTSProvider,
-    SynthesisRequest,
     TTSAudioChunk,
     TTSCapabilityError,
     TTSEvent,
