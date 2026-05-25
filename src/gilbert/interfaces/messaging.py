@@ -39,9 +39,11 @@ __all__ = [
     "Message",
     "MessageDirection",
     "MessageStatus",
+    "MessageType",
     "MessagingBackend",
     "MessagingProvider",
     "MessagingWebhookEndpoint",
+    "SendResult",
     "ThreadSummary",
 ]
 
@@ -58,6 +60,36 @@ class MessageDirection(StrEnum):
 
     INBOUND = "inbound"
     OUTBOUND = "outbound"
+
+
+class MessageType(StrEnum):
+    """Transport tier the message actually rode on.
+
+    - ``RCS``: Rich Communication Services. Modern carrier-backed
+      successor to SMS — typed/rich text, media, read receipts,
+      typing indicators, no per-segment length limit, end-to-end
+      encryption (Universal Profile 2.0+). Default preference for
+      outbound; supported on Android Messages, Google Messages, and
+      iOS 18+ via Apple's RCS UP 2.0 rollout.
+    - ``MMS``: Multimedia Messaging Service. SMS + binary attachments
+      (images, audio, video). Used when the message has media AND
+      the recipient doesn't support RCS.
+    - ``SMS``: Plain text, 160-char-per-segment, no media. The
+      lowest-common-denominator fallback when neither RCS nor MMS
+      is available.
+
+    For OUTBOUND messages this enum captures BOTH the caller's
+    preference (passed to ``send_message`` as ``preferred_type``) AND
+    what the backend / carrier actually ended up using (stored on
+    ``Message.type``). They differ when fallback fires — e.g. the
+    caller requested ``RCS`` but the recipient isn't RCS-capable, so
+    the carrier downgraded to ``SMS``. Inbound messages just carry
+    whatever transport the carrier reported.
+    """
+
+    RCS = "rcs"
+    MMS = "mms"
+    SMS = "sms"
 
 
 class MessageStatus(StrEnum):
@@ -104,6 +136,13 @@ class Message:
     media_urls: list[str] = field(default_factory=list)
     error: str = ""
     backend: str = ""  # which MessagingBackend handled this (for diagnostics)
+    # Transport tier the message ACTUALLY rode on (RCS / MMS / SMS).
+    # Empty string only on legacy rows persisted before this field
+    # existed — the carrier reports it on both inbound and outbound
+    # since both directions need to round-trip the actual transport
+    # for the SPA's per-message badge. See ``MessageType`` docstring
+    # for why preferred-vs-actual differ when fallback fires.
+    type: str = ""  # MessageType value, empty for legacy rows
 
 
 @dataclass
@@ -173,14 +212,35 @@ class MessagingBackend(ABC):
         body: str,
         from_number: str = "",
         media_urls: list[str] | None = None,
-    ) -> str:
-        """Send one message. Returns the backend-issued message id.
+        preferred_type: MessageType = MessageType.RCS,
+    ) -> "SendResult":
+        """Send one message. Returns a ``SendResult`` carrying the
+        backend-issued ``message_id`` and the ``actual_type`` the
+        carrier ended up using (which may downgrade from
+        ``preferred_type`` when fallback fires).
 
         ``from_number`` is optional — when empty, the backend uses
-        whatever default it has configured. Raises on transport
-        errors; success means the carrier accepted the message for
-        delivery, NOT that the recipient has received it (that comes
-        via webhook callback)."""
+        whatever default it has configured. ``preferred_type``
+        defaults to ``RCS`` per the modern-first policy; the
+        carrier downgrades to ``MMS`` (when media is present and RCS
+        is unavailable) or ``SMS`` (no media, no RCS). Raises on
+        transport errors; success means the carrier accepted the
+        message for delivery, NOT that the recipient has received
+        it (that comes via webhook callback)."""
+
+
+@dataclass
+class SendResult:
+    """What a ``MessagingBackend.send_message`` call resolves to.
+
+    Separating this out lets the service layer record the actual
+    transport tier the carrier picked (after any fallback) rather
+    than just the carrier-issued id — the SPA renders a per-message
+    badge so the user can see when RCS downgraded to SMS.
+    """
+
+    message_id: str
+    actual_type: str  # MessageType value
 
 
 # ── Capability protocols ─────────────────────────────────────────────
@@ -204,10 +264,17 @@ class MessagingProvider(Protocol):
         body: str,
         from_number: str = "",
         media_urls: list[str] | None = None,
+        preferred_type: MessageType | None = None,
     ) -> Message:
         """Send a message on behalf of ``user_id``. Returns the
-        persisted ``Message`` row (with backend-issued ``message_id``
-        and the resolved ``our_number``)."""
+        persisted ``Message`` row (with backend-issued ``message_id``,
+        the resolved ``our_number``, and the actual transport tier
+        the carrier picked in ``type``).
+
+        ``preferred_type`` defaults to the service's configured
+        default (``RCS`` out of the box). Pass an explicit value to
+        force a downgrade — e.g. RCS not yet rolled out on a
+        particular carrier."""
         ...
 
     async def list_threads(self, user_id: str) -> list[ThreadSummary]:
