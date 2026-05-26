@@ -170,6 +170,40 @@ class MentraWebhookEndpoint(Protocol):
         ...
 
 
+@runtime_checkable
+class MentraDebugProvider(Protocol):
+    """Capability advertised by the Mentra plugin so core's
+    ``/api/mentra/debug/*`` routes can introspect live session state
+    without importing the plugin module directly.
+
+    Exposes a per-user ring buffer of recent events (session lifecycle
+    transitions, transcription finals, AI dispatches, audio
+    responses, etc.) used by the in-glasses-app companion webview
+    for live debugging. The webview reads ``aos_signed_user_token``
+    from the URL, decodes the JWT payload's ``sub`` claim to identify
+    the user, and polls this provider for that user's recent events.
+    """
+
+    def get_recent_events(
+        self, mentra_user_id: str, *, limit: int = 50
+    ) -> list[dict[str, object]]:
+        """Return up to ``limit`` recent events for the given Mentra
+        user, oldest first. Each event is a dict with at minimum
+        ``timestamp`` (ISO 8601), ``kind`` (event-type string),
+        ``level`` (``"info"`` | ``"warning"`` | ``"error"``), and
+        ``message`` (display string). Some events carry extra
+        ``data``."""
+        ...
+
+    def get_active_session_summary(
+        self, mentra_user_id: str
+    ) -> dict[str, object] | None:
+        """Snapshot of the currently-live session for the user, or
+        ``None`` if no session is active. Used by the debug webview
+        for the "connected device" header."""
+        ...
+
+
 # ── Subscription-side data classes ──────────────────────────────────
 #
 # These appear in the plugin too, but live here so any future service
