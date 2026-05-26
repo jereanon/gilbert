@@ -42,10 +42,20 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 __all__ = [
+    "AudioChunk",
+    "ButtonPress",
+    "GlassesCapabilities",
+    "HeadPosition",
+    "LocationData",
+    "LocationUpdate",
     "MentraWebhookEndpoint",
+    "PhotoData",
     "SessionWebhookRequest",
     "StopRequestReason",
     "StopWebhookRequest",
+    "StreamResult",
+    "TranscriptionData",
+    "VadEvent",
     "WebhookRequestType",
     "WebhookResponse",
 ]
@@ -218,6 +228,88 @@ class LocationUpdate:
 
     lat: float
     lng: float
+
+
+@dataclass
+class AudioChunk:
+    """One chunk of raw PCM audio from the glasses microphone.
+
+    The wire format is always 16 kHz mono signed 16-bit PCM — the
+    native format of the glasses mic hardware. Arrives over the
+    WebSocket as binary frames; the session layer wraps each frame
+    with metadata before surfacing to handlers."""
+
+    data: bytes
+    sample_rate: int = 16000
+    channels: int = 1
+    timestamp_ms: float = 0.0
+
+
+@dataclass
+class VadEvent:
+    """Voice-activity detection state from the glasses.
+
+    The glasses run on-device VAD and emit start/stop events as the
+    user's speech state changes. ``is_speaking=True`` when speech
+    began; ``False`` when it ended. The cloud sometimes ships the
+    ``status`` field as a string (``"true"`` / ``"false"``) rather
+    than a JSON boolean — the manager normalizes both shapes."""
+
+    is_speaking: bool
+    timestamp_ms: float = 0.0
+
+
+@dataclass
+class LocationData:
+    """Resolved location from the glasses-via-phone GPS.
+
+    Mirrors the upstream SDK's ``LocationData`` interface — only
+    lat/lng are guaranteed; accuracy may be absent on degraded
+    fixes. ``correlation_id`` is set when the data is the response
+    to a one-shot ``request_update()`` call (the manager uses it to
+    resolve the matching pending Future)."""
+
+    lat: float
+    lng: float
+    accuracy: float | None = None
+    timestamp_ms: float = 0.0
+    correlation_id: str = ""
+
+
+@dataclass
+class PhotoData:
+    """Result of a successful ``CameraManager.take_photo()`` call.
+
+    Mentra's photo flow returns a URL the cloud hosts the file at —
+    Gilbert downloads the bytes itself (via ``httpx``) so the
+    photo lives in our entity store instead of relying on the
+    cloud's retention.
+    """
+
+    url: str
+    width: int = 0
+    height: int = 0
+    timestamp_ms: float = 0.0
+    saved_to_gallery: bool = False
+    request_id: str = ""
+
+
+@dataclass
+class StreamResult:
+    """URLs returned when a managed livestream goes active.
+
+    ``hls_url`` / ``dash_url`` / ``webrtc_url`` are viewer-facing
+    playback endpoints (HLS is the most broadly compatible).
+    ``preview_url`` / ``thumbnail_url`` are static images for
+    cards. ``stream_id`` is the cloud's correlation handle —
+    useful for diagnostics."""
+
+    hls_url: str = ""
+    dash_url: str = ""
+    webrtc_url: str = ""
+    preview_url: str = ""
+    thumbnail_url: str = ""
+    stream_id: str = ""
 
 
 @dataclass
