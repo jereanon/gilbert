@@ -20,7 +20,6 @@ sub-modules only. No core service imports.
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -440,6 +439,21 @@ class ConversationConfig:
     # (e.g. wrap with "(OPERATOR DIRECTIVE: …)" — the engine
     # doesn't add any such marker itself).
     inject_synthetic_user_turn_queue: Any = None  # asyncio.Queue[str] | None
+
+    # Skip the engine's internal STT loop entirely. When True the
+    # listen loop early-returns without opening a Scribe stream;
+    # the engine relies on ``inject_synthetic_user_turn_queue`` for
+    # every user turn. Use this when the wrapper has its OWN
+    # transcription source the engine can't reach (e.g. Mentra
+    # smart-glasses where the cloud platform does the transcription
+    # and ships finalised text to the app via a JSON stream, NOT
+    # raw PCM the engine could feed to Scribe).
+    #
+    # Default False preserves the existing engine-owns-STT
+    # behaviour for phone and voice-agent. The wrapper that sets
+    # this MUST populate ``inject_synthetic_user_turn_queue`` —
+    # otherwise the engine never gets a user turn after the opener.
+    disable_internal_stt: bool = False
 
 
 # ── Outcome the engine returns ───────────────────────────────────────

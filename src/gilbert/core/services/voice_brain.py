@@ -52,16 +52,20 @@ from gilbert.interfaces.conversation import (
 from gilbert.interfaces.service import Service, ServiceInfo, ServiceResolver
 from gilbert.interfaces.transcription import (
     AudioEncoding,
-    AudioFormat as TranscriptionAudioFormat,
     FinalTranscript,
-    SpeechEnded,
     PartialTranscript,
+    SpeechEnded,
     SpeechStarted,
     StreamConfig,
     StreamingTranscriber,
 )
+from gilbert.interfaces.transcription import (
+    AudioFormat as TranscriptionAudioFormat,
+)
 from gilbert.interfaces.tts import (
     AudioFormat as TTSAudioFormat,
+)
+from gilbert.interfaces.tts import (
     SynthesisRequest,
     TTSProvider,
 )
@@ -679,7 +683,7 @@ class VoiceBrainService(Service):
                             asyncio.shield(chat_task),
                             timeout=config.filler_threshold_seconds,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # LLM hasn't returned in time — speak a
                         # filler, record it as a turn (so the
                         # transcript shows what the user heard),
@@ -1097,6 +1101,17 @@ class VoiceBrainService(Service):
             nonlocal already_spoke, remote_started_talking
             if self._transcription is None:
                 log.warning("Transcription unavailable — conversation continues TTS-only")
+                outcome["transcription_available"] = False
+                return
+            if config.disable_internal_stt:
+                # Wrapper has its own STT source and feeds turns via
+                # ``inject_synthetic_user_turn_queue``. The engine
+                # skips its Scribe loop entirely — no audio pump, no
+                # local VAD, no per-second Scribe charges.
+                log.info(
+                    "Internal STT disabled by config — engine driven "
+                    "by inject_synthetic_user_turn_queue only"
+                )
                 outcome["transcription_available"] = False
                 return
             # Pick the STT input format. Phone calls leave
