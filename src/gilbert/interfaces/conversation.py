@@ -455,6 +455,33 @@ class ConversationConfig:
     # otherwise the engine never gets a user turn after the opener.
     disable_internal_stt: bool = False
 
+    # Speaker diarization. When True the engine asks the STT
+    # backend for speaker-labelled transcripts (Scribe Realtime
+    # populates ``FinalTranscript.speaker_label`` from per-word
+    # ``speaker_id`` fields), then applies a "first seen"
+    # classifier:
+    #
+    #   - A speaker_label first heard while the engine is speaking
+    #     (``speaking.active=True``) is classified as Gilbert (echo).
+    #   - A speaker_label first heard while the engine is silent
+    #     is classified as the user.
+    #
+    # Gilbert-classified transcripts get dropped for the rest of
+    # the session — catches echo even after the playback estimate
+    # runs out. User-classified transcripts flow through even
+    # while Gilbert is speaking — restores intentional barge-in
+    # (the user can interrupt mid-sentence and their voice still
+    # reaches the LLM).
+    #
+    # Default False: existing engine behaviour (every committed
+    # transcript dispatches; barge-in driven by local VAD only).
+    # Worth turning on when the modality has speaker → mic bleed
+    # the cloud transcriber can pick up (any open-air speaker:
+    # voice-agent on laptop speakers, smart glasses, kiosks).
+    # Phone calls don't need it — the carrier wire is effectively
+    # half-duplex from our perspective.
+    diarize_speakers: bool = False
+
 
 # ── Outcome the engine returns ───────────────────────────────────────
 
