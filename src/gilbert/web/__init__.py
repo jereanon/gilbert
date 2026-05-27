@@ -78,6 +78,7 @@ def create_app(gilbert: Gilbert) -> FastAPI:
     from gilbert.web.routes.share import router as share_router
     from gilbert.web.routes.telnyx_webhooks import router as telnyx_router
     from gilbert.web.routes.tls import router as tls_router
+    from gilbert.web.routes.audio_blob import router as audio_blob_router
     from gilbert.web.routes.tts import router as tts_router
     from gilbert.web.routes.websocket import router as ws_router
 
@@ -102,6 +103,7 @@ def create_app(gilbert: Gilbert) -> FastAPI:
     app.include_router(telnyx_router)
     app.include_router(tls_router)
     app.include_router(tts_router)
+    app.include_router(audio_blob_router)
     app.include_router(ws_router)
 
     # MCP server endpoint — raw ASGI, not a FastAPI route (see

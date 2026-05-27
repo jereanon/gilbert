@@ -85,6 +85,14 @@ _PUBLIC_PREFIXES = (
     # ElevenLabs / Kokoro / etc. — but the auth is handled
     # in-route, not at the middleware layer.)
     "/api/tts",
+    # Same posture as ``/api/tts``: ``/api/audio-blob/<id>`` is the
+    # short-lived public URL plugins use to expose engine-synthesized
+    # audio bytes to external cloud audio routers (Mentra Cloud's
+    # server-side fetcher being the first consumer). The blob id
+    # itself is a random uuid with a ~60s TTL — that's the auth.
+    # Without the exempt entry the cloud's GET 302s to login and
+    # the user hears silence.
+    "/api/audio-blob/",
 )
 
 
