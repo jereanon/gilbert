@@ -26,12 +26,18 @@ from gilbert.web.routes.mentra_webhooks import router as mentra_router
 
 class _CapableEndpoint:
     """Stub that satisfies the ``MentraWebhookEndpoint`` Protocol
-    (the runtime_checkable shape is one async method)."""
+    (the runtime_checkable shape is the webhook + photo-upload
+    methods)."""
 
     def __init__(self) -> None:
         self.delivered: list[dict[str, Any]] = []
+        self.uploaded: list[dict[str, Any]] = []
         self.raise_on_deliver = False
+        self.raise_on_upload = False
         self.response = WebhookResponse(status="success")
+        self.upload_response = WebhookResponse(
+            status="success", message="resolved against session sess_x"
+        )
 
     async def deliver_webhook_event(
         self, payload: dict[str, object]
@@ -40,6 +46,28 @@ class _CapableEndpoint:
             raise RuntimeError("simulated dispatch error")
         self.delivered.append(dict(payload))
         return self.response
+
+    async def deliver_photo_upload(
+        self,
+        *,
+        request_id: str,
+        photo_bytes: bytes,
+        mime_type: str,
+        error_code: str = "",
+        error_message: str = "",
+    ) -> WebhookResponse:
+        if self.raise_on_upload:
+            raise RuntimeError("simulated upload dispatch error")
+        self.uploaded.append(
+            {
+                "request_id": request_id,
+                "photo_bytes": bytes(photo_bytes),
+                "mime_type": mime_type,
+                "error_code": error_code,
+                "error_message": error_message,
+            }
+        )
+        return self.upload_response
 
 
 def _make_app(endpoint: Any | None) -> FastAPI:
@@ -173,3 +201,135 @@ def test_webhook_returns_error_on_non_object_json() -> None:
     body = response.json()
     assert body["status"] == "error"
     assert "object" in body["message"].lower()
+
+
+# ── Photo upload route ─────────────────────────────────────────────
+
+
+def test_photo_upload_dispatches_to_capability_with_bytes() -> None:
+    """Happy path: cloud POSTs multipart with requestId + photo file,
+    route parses + dispatches to deliver_photo_upload, returns 200
+    with the upstream-shaped JSON body."""
+    endpoint = _CapableEndpoint()
+    client = TestClient(_make_app(endpoint))
+
+    response = client.post(
+        "/api/mentra/photo-upload",
+        data={"requestId": "photo_req_abc", "type": "photo_success"},
+        files={"photo": ("snap.jpg", b"\xff\xd8\xff\xe0FAKEJPEG", "image/jpeg")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["requestId"] == "photo_req_abc"
+    # Plugin received the bytes + mime untouched.
+    assert len(endpoint.uploaded) == 1
+    call = endpoint.uploaded[0]
+    assert call["request_id"] == "photo_req_abc"
+    assert call["photo_bytes"] == b"\xff\xd8\xff\xe0FAKEJPEG"
+    assert call["mime_type"] == "image/jpeg"
+    assert call["error_code"] == ""
+    assert call["error_message"] == ""
+
+
+def test_photo_upload_error_response_strips_bytes_and_carries_error() -> None:
+    """type=photo_error → don't pass any bytes through, do pass
+    errorCode + errorMessage. Mirrors the upstream SDK's defensive
+    parsing (file presence is the primary success indicator; explicit
+    error flag without bytes = real failure)."""
+    endpoint = _CapableEndpoint()
+    client = TestClient(_make_app(endpoint))
+
+    response = client.post(
+        "/api/mentra/photo-upload",
+        data={
+            "requestId": "photo_req_xyz",
+            "type": "photo_error",
+            "errorCode": "CAMERA_BUSY",
+            "errorMessage": "another capture in flight",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True  # error was successfully delivered
+    call = endpoint.uploaded[0]
+    assert call["photo_bytes"] == b""
+    assert call["error_code"] == "CAMERA_BUSY"
+    assert "another capture" in call["error_message"]
+
+
+def test_photo_upload_returns_404_when_no_pending_request() -> None:
+    """Plugin returns status=error when the request_id doesn't match
+    any pending take_photo() — the route surfaces that as 404 per
+    upstream contract so the cloud doesn't retry forever."""
+    endpoint = _CapableEndpoint()
+    endpoint.upload_response = WebhookResponse(
+        status="error",
+        message="no pending photo request found for request_id",
+    )
+    client = TestClient(_make_app(endpoint))
+
+    response = client.post(
+        "/api/mentra/photo-upload",
+        data={"requestId": "photo_req_unknown"},
+        files={"photo": ("a.jpg", b"x", "image/jpeg")},
+    )
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["success"] is False
+    assert body["requestId"] == "photo_req_unknown"
+
+
+def test_photo_upload_missing_request_id_returns_400() -> None:
+    """Cloud is supposed to always send requestId — but if it
+    doesn't, we can't possibly correlate. Reject with 400 rather
+    than guessing."""
+    endpoint = _CapableEndpoint()
+    client = TestClient(_make_app(endpoint))
+
+    response = client.post(
+        "/api/mentra/photo-upload",
+        files={"photo": ("a.jpg", b"x", "image/jpeg")},
+    )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["success"] is False
+    # Plugin was never called.
+    assert endpoint.uploaded == []
+
+
+def test_photo_upload_returns_503_when_capability_absent() -> None:
+    """No mentra plugin loaded → 503. The cloud will back off."""
+    client = TestClient(_make_app(None))
+
+    response = client.post(
+        "/api/mentra/photo-upload",
+        data={"requestId": "photo_req_abc"},
+        files={"photo": ("a.jpg", b"x", "image/jpeg")},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["success"] is False
+
+
+def test_photo_upload_dispatch_raise_returns_500() -> None:
+    """Plugin raises → 500. Distinct from 404 so it shows up as a
+    real bug in the cloud's metrics rather than silently dropping."""
+    endpoint = _CapableEndpoint()
+    endpoint.raise_on_upload = True
+    client = TestClient(_make_app(endpoint))
+
+    response = client.post(
+        "/api/mentra/photo-upload",
+        data={"requestId": "photo_req_abc"},
+        files={"photo": ("a.jpg", b"x", "image/jpeg")},
+    )
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["success"] is False
+    assert "dispatch" in body["error"].lower()

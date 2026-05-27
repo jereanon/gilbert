@@ -53,6 +53,150 @@ def _get_endpoint(state: Any) -> MentraWebhookEndpoint | None:
     return svc
 
 
+@router.post("/photo-upload")
+async def mentra_photo_upload(request: Request) -> JSONResponse:
+    """Receive a photo upload from Mentra Cloud.
+
+    Mentra Live's photo-capture flow is push-based: the cloud POSTs
+    multipart form-data here (URL pattern documented in the upstream
+    SDK's ``MiniAppServer.setupPhotoUploadEndpoint`` at
+    ``${publicUrl}/photo-upload``; our routes are prefixed
+    ``/api/mentra``). Fields: ``requestId`` (matches our pending
+    ``photo_request``), ``type`` (``photo_error`` on failure),
+    ``errorCode`` / ``errorMessage`` (on error), and ``photo``
+    (the actual file).
+
+    Returns the upstream contract shape: 200 with
+    ``{success, requestId, message}`` on match, 404 with
+    ``{success: false, error}`` when no pending request is found
+    (request timed out, session ended, etc.). The plugin treats
+    both as "stop retrying" so Mentra Cloud doesn't queue.
+    """
+    endpoint = _get_endpoint(request.app.state)
+    if endpoint is None:
+        logger.warning(
+            "Mentra photo-upload arrived but plugin isn't loaded"
+        )
+        return JSONResponse(
+            {"success": False, "error": "mentra plugin not loaded"},
+            status_code=503,
+        )
+
+    try:
+        form = await request.form()
+    except Exception:
+        logger.warning(
+            "Mentra photo-upload with unparseable multipart body"
+        )
+        return JSONResponse(
+            {"success": False, "error": "unparseable multipart body"},
+            status_code=400,
+        )
+
+    request_id = str(form.get("requestId") or "")
+    if not request_id:
+        logger.warning("Mentra photo-upload missing requestId field")
+        return JSONResponse(
+            {"success": False, "error": "missing requestId"},
+            status_code=400,
+        )
+
+    type_field = str(form.get("type") or "")
+    error_code = str(form.get("errorCode") or "")
+    error_message = str(form.get("errorMessage") or "")
+    success_field = str(form.get("success") or "")
+    is_explicit_error = (
+        type_field == "photo_error" or success_field == "false"
+    )
+
+    photo_bytes = b""
+    mime_type = ""
+    photo_file = form.get("photo")
+    # Starlette returns UploadFile for file fields. The presence of
+    # ``read`` + ``filename`` is the canonical duck-type check.
+    if hasattr(photo_file, "read"):
+        try:
+            photo_bytes = await photo_file.read()  # type: ignore[union-attr]
+        except Exception:
+            logger.exception(
+                "Mentra photo-upload failed to read file field "
+                "request_id=%s",
+                request_id,
+            )
+            return JSONResponse(
+                {
+                    "success": False,
+                    "error": "failed to read photo file",
+                    "requestId": request_id,
+                },
+                status_code=500,
+            )
+        mime_type = getattr(photo_file, "content_type", "") or ""
+
+    has_photo = bool(photo_bytes)
+    logger.info(
+        "Mentra photo-upload: request_id=%s type=%r has_photo=%s "
+        "bytes=%d mime=%s explicit_error=%s",
+        request_id,
+        type_field,
+        has_photo,
+        len(photo_bytes),
+        mime_type or "<none>",
+        is_explicit_error,
+    )
+
+    # Upstream convention: error iff explicit_error AND no photo
+    # file present. Don't reject the success path just because the
+    # ``success`` field is missing — some clients omit it.
+    is_error_response = is_explicit_error and not has_photo
+
+    try:
+        result = await endpoint.deliver_photo_upload(
+            request_id=request_id,
+            photo_bytes=b"" if is_error_response else photo_bytes,
+            mime_type=mime_type or "image/jpeg",
+            error_code=error_code if is_error_response else "",
+            error_message=error_message if is_error_response else "",
+        )
+    except Exception:
+        logger.exception(
+            "Mentra photo-upload dispatch raised request_id=%s",
+            request_id,
+        )
+        return JSONResponse(
+            {
+                "success": False,
+                "error": "dispatch raised",
+                "requestId": request_id,
+            },
+            status_code=500,
+        )
+
+    if isinstance(result, WebhookResponse) and result.status == "success":
+        return JSONResponse(
+            {
+                "success": True,
+                "requestId": request_id,
+                "message": result.message or "photo received",
+            },
+            status_code=200,
+        )
+    # No pending request matched → 404 per upstream contract so the
+    # cloud doesn't retry. Also covers session-ended-mid-capture.
+    return JSONResponse(
+        {
+            "success": False,
+            "error": (
+                result.message
+                if isinstance(result, WebhookResponse)
+                else "no pending request found"
+            ),
+            "requestId": request_id,
+        },
+        status_code=404,
+    )
+
+
 @router.post("/webhook")
 async def mentra_webhook(request: Request) -> dict[str, str]:
     """Receive a Mentra Cloud webhook (session_request /

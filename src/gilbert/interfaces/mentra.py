@@ -152,12 +152,21 @@ class WebhookResponse:
 @runtime_checkable
 class MentraWebhookEndpoint(Protocol):
     """Capability advertised by the Mentra plugin so core's
-    ``/api/mentra/webhook`` route can hand the raw payload off without
-    importing the plugin module directly.
+    ``/api/mentra/webhook`` + ``/api/mentra/photo-upload`` routes can
+    hand the raw payloads off without importing the plugin module
+    directly.
 
-    The plugin parses the payload into a ``SessionWebhookRequest`` or
-    ``StopWebhookRequest`` and, for session requests, opens a
-    WebSocket back to Mentra Cloud and binds the per-session managers.
+    The plugin:
+
+    - Parses lifecycle webhook payloads into ``SessionWebhookRequest``
+      or ``StopWebhookRequest`` and, for session requests, opens a
+      WebSocket back to Mentra Cloud and binds the per-session
+      managers (``deliver_webhook_event``).
+    - Resolves inbound photo uploads against the matching pending
+      ``CameraManager.take_photo()`` future
+      (``deliver_photo_upload``). Mentra Cloud POSTs photo bytes here
+      after the ASG glasses snap the photo — the request_id matches
+      what we sent in the original ``photo_request`` frame.
 
     Mirrors ``TelnyxWebhookEndpoint`` / ``MessagingWebhookEndpoint``
     for parallelism — the route's contract is the same regardless of
@@ -167,6 +176,32 @@ class MentraWebhookEndpoint(Protocol):
     async def deliver_webhook_event(
         self, payload: dict[str, object]
     ) -> WebhookResponse:
+        ...
+
+    async def deliver_photo_upload(
+        self,
+        *,
+        request_id: str,
+        photo_bytes: bytes,
+        mime_type: str,
+        error_code: str = "",
+        error_message: str = "",
+    ) -> WebhookResponse:
+        """Resolve a pending photo request with the cloud's uploaded
+        bytes (or a failure signal).
+
+        - ``request_id`` matches the ``requestId`` field on the
+          original ``photo_request`` WS frame.
+        - ``photo_bytes`` is empty on the error path
+          (``error_code`` / ``error_message`` populated).
+        - ``mime_type`` from the upload's ``Content-Type`` (typically
+          ``image/jpeg``; cloud may send PNG depending on settings).
+
+        Returns ``status=success`` when a pending request matched +
+        was resolved, ``status=error`` when no pending request was
+        found (e.g. the take_photo() call already timed out). The
+        plugin treats both cases as 200 so the cloud doesn't retry.
+        """
         ...
 
 
@@ -314,13 +349,27 @@ class LocationData:
 class PhotoData:
     """Result of a successful ``CameraManager.take_photo()`` call.
 
-    Mentra's photo flow returns a URL the cloud hosts the file at —
-    Gilbert downloads the bytes itself (via ``httpx``) so the
-    photo lives in our entity store instead of relying on the
-    cloud's retention.
+    Mentra Cloud delivers the actual photo via TWO patterns depending
+    on the device + cloud configuration:
+
+    1. **HTTP push (Mentra Live default)** — Cloud POSTs multipart
+       form-data to ``<app-server>/api/mentra/photo-upload`` with the
+       file bytes inline. The plugin's photo-upload handler stuffs
+       ``data`` + ``mime_type`` directly into this dataclass and
+       resolves the pending ``take_photo()`` future. ``url`` stays
+       empty in this case.
+    2. **Cloud-hosted URL (legacy / some devices)** — Cloud responds
+       to the WS ``photo_request`` with a ``photo_response`` carrying
+       a ``photoUrl``. Caller downloads bytes from the URL itself.
+       ``data`` + ``mime_type`` stay empty.
+
+    Consumers should prefer ``data`` when present (zero round-trip)
+    and only fall back to ``url`` when it's not.
     """
 
-    url: str
+    url: str = ""
+    data: bytes = b""
+    mime_type: str = ""
     width: int = 0
     height: int = 0
     timestamp_ms: float = 0.0
