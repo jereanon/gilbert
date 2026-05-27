@@ -73,6 +73,18 @@ _PUBLIC_PREFIXES = (
     # opens, so the glasses sit forever in "Connecting…" with no
     # diagnostic that surfaces in Gilbert's logs.
     "/api/mentra/",
+    # ``/api/tts`` is the public TTS endpoint Mentra Cloud fetches
+    # when a Mentra app calls ``session.audio.speak(text)`` — the SDK
+    # builds ``<app-server-url>/api/tts?text=...`` and Mentra Cloud
+    # GETs that URL to retrieve audio bytes. Cloud can't carry a
+    # Gilbert session cookie; without this exempt the auth
+    # middleware 302s every TTS fetch to the login page, the cloud
+    # gets an HTML response, plays garbage / silence, and the user
+    # hears nothing. (The endpoint itself is rate-limited and
+    # cost-sensitive — every GET runs a real TTS synthesis through
+    # ElevenLabs / Kokoro / etc. — but the auth is handled
+    # in-route, not at the middleware layer.)
+    "/api/tts",
 )
 
 
