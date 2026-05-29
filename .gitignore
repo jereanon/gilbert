@@ -1,6 +1,11 @@
 # Gilbert installation data (per-instance config, database, logs, plugin cache)
 .gilbert/
 
+# Show5 firmware build cache (~5 GB ESP-IDF + LLVM toolchain pulled by embuild)
+firmware/show5-firmware/.embuild/
+firmware/show5-firmware/target/
+firmware/show5-firmware/Cargo.lock.bak
+
 # Nexia library auto-writes per-house config caches to the working
 # directory (named ``<brand>_config_<house_name>.conf``) — sometimes
 # bypassing the plugin's configured ``state_file`` path. Treat any

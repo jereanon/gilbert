@@ -1,0 +1,24 @@
+# ESP32-P4 is RISC-V with rv32imafc (M + Atomic + Float + Compressed).
+# The stable Rust toolchain ships this target out of the box — no Xtensa
+# fork needed. ``espflash flash`` is the runner so ``cargo run`` flashes.
+[build]
+target = "riscv32imafc-esp-espidf"
+
+# The ``*-esp-espidf`` targets are tier-3 in upstream rustc — we rely on
+# nightly + ``-Z build-std`` to rebuild libstd against the IDF newlib.
+[target.'cfg(target_os = "espidf")']
+linker = "ldproxy"
+runner = "espflash flash --monitor"
+rustflags = ["--cfg", "espidf_time64"]
+
+[env]
+# ESP-IDF v5.3 was the first release with ESP32-P4 support; v5.4 is the
+# stable choice today. Pin precisely so different machines build the same
+# firmware. embuild caches IDF under ~/.espressif/.
+MCU = "esp32p4"
+ESP_IDF_VERSION = "v5.4"
+
+# Defer ESP-IDF + LLVM detection to build time; embuild will pull what's
+# needed and stash it in ~/.espressif.
+[unstable]
+build-std = ["std", "panic_abort"]

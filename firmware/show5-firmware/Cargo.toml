@@ -1,0 +1,43 @@
+[package]
+name = "show5-firmware"
+version = "0.1.0"
+edition = "2021"
+authors = ["Jeremy <jeremy@possiblyfaulty.com>"]
+description = "Rust thin-client firmware for the IoTeikXgo 5\" ESP32-P4 display, paired with a Gilbert instance"
+license = "MIT"
+resolver = "2"
+rust-version = "1.77"
+
+[[bin]]
+name = "show5-firmware"
+harness = false  # do not use the built-in cargo test harness
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+debug = false
+panic = "abort"
+overflow-checks = false
+incremental = false
+strip = true
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+# Phase 0 esp-idf-svc track. esp-idf-svc + esp-idf-hal + esp-idf-sys pull
+# the full ESP-IDF C SDK under embuild — first build is slow (5-10 min on
+# this Mac) but every rebuild after is fast. We pin minor versions; ESP-IDF
+# itself is selected via ESP_IDF_VERSION in .cargo/config.toml.
+[dependencies]
+esp-idf-svc = { version = "0.52", default-features = false, features = [
+    "binstart",
+    "alloc",
+    "std",
+] }
+anyhow = "1.0"
+log = "0.4"
+
+[build-dependencies]
+embuild = "0.33"

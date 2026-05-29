@@ -1,0 +1,14 @@
+# Rust / Cargo
+target/
+Cargo.lock.bak
+
+# embuild / esp-idf-sys caches that escape ~/.espressif (rare)
+.embuild/
+
+# espflash / serial port temp
+*.bin.bak
+
+# editor stuff
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,46 @@
+# ESP-IDF sdkconfig overrides applied at IDF configure time. ``embuild``
+# merges these into the auto-generated sdkconfig before building. Keep
+# this MINIMAL — every line is a deviation from the IDF defaults, and
+# every deviation is something a future-you has to understand.
+
+# ── Watchdog ───────────────────────────────────────────────────────────
+# Bump the task watchdog timeout so first-boot LVGL paint doesn't trip
+# the WDT while ESP-IDF is still warming caches.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=20
+
+# ── PSRAM ──────────────────────────────────────────────────────────────
+# The IoTeikXgo P4 board ships 32 MiB PSRAM (octal). Without this LVGL
+# can't allocate a full 800×480 RGB565 framebuffer (768 KB) in SRAM.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_BOOT_INIT=y
+# Map BSS into PSRAM so LVGL buffers default there.
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# ── Wi-Fi via ESP32-C6 hosted ─────────────────────────────────────────
+# The P4 has no native radio; the C6 co-processor on the same board acts
+# as a Wi-Fi/BT NIC via SDIO. Enable the hosted host driver. This pulls
+# in the esp_wifi_remote shim which proxies Wi-Fi APIs to the C6.
+CONFIG_ESP_WIFI_REMOTE_ENABLED=y
+CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
+
+# ── Logging ────────────────────────────────────────────────────────────
+# INFO at runtime; the boot log stays VERBOSE so we can diagnose early
+# crashes. Production builds dial both down.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+
+# ── Partition table ────────────────────────────────────────────────────
+# Phase 0 uses the IDF default single-app table. Phase 0.5 swaps in the
+# dual-OTA layout from partitions.csv via a slightly different embuild
+# mechanism (the simple filename override doesn't propagate the file
+# into esp-idf-sys's build dir — needs a custom partition_table component
+# or an absolute path).
+# CONFIG_PARTITION_TABLE_CUSTOM=y
+# CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ── Memory protection ──────────────────────────────────────────────────
+# Disable IRAM placement of all interrupt handlers — we're not chasing
+# microsecond latency and IRAM is small.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

@@ -1,0 +1,8 @@
+[toolchain]
+# ESP32-P4 is RISC-V; stable Rust supports the target. We use nightly
+# only for ``-Z build-std`` (rebuilding std for the bare-metal target),
+# which stable rust-toolchain doesn't permit. If/when build-std lands on
+# stable, drop the nightly pin.
+channel = "nightly-2025-12-15"
+components = ["rust-src", "rustfmt", "clippy"]
+targets = ["riscv32imafc-unknown-none-elf"]
