@@ -482,6 +482,50 @@ class ConversationConfig:
     # half-duplex from our perspective.
     diarize_speakers: bool = False
 
+    # ── Addressing / noise filter ────────────────────────────────────
+    #
+    # Final transcripts route through two opt-in gates before the
+    # engine spawns an LLM turn. Both default off to preserve existing
+    # phone-call behaviour where every committed transcript dispatches.
+    #
+    # Voice-agent / smart-glasses sessions (open-mic, long-running)
+    # turn both on so the engine stops responding to coughs, throat-
+    # clears, and ambient chatter not directed at the assistant.
+    #
+    # **Layer 1 — cheap noise filter (sync, ~µs).**
+    # Transcripts shorter than ``min_address_chars`` after stripping
+    # punctuation, OR transcripts whose lowercased token list is a
+    # subset of ``noise_words``, get dropped. Catches the obvious
+    # cases (cough → "uh", throat clear → "hmm", "mhm", "huh?")
+    # without burning an LLM call. The SPA still gets the transcript
+    # via ``on_transcript_turn`` (with a "dropped:noise" marker) so
+    # the user can SEE what the engine heard and chose to ignore.
+    min_address_chars: int = 0  # 0 = disabled (every length passes)
+    noise_words: frozenset[str] = field(default_factory=frozenset)
+    """Lowercased tokens that, when they make up the ENTIRE
+    utterance, signal noise rather than addressing. Single-word
+    fillers like ``hmm``, ``uh``, ``um``, ``ah``, ``oh``, ``mhm``,
+    ``mmm``, ``huh`` — populate with the set you want dropped. A
+    transcript whose token set ⊆ ``noise_words`` is dropped."""
+
+    # **Layer 2 — LLM addressing gate (async, one cheap call).**
+    # When enabled and the noise filter let the transcript through,
+    # the engine asks the AI provider a yes/no question: "Given the
+    # last assistant turn, is the user addressing the assistant?"
+    # Adds ~100-300 ms but skips the FULL agentic chat() call when
+    # the user clearly wasn't talking to Gilbert, which is the much
+    # larger win. The engine logs each drop and records the
+    # transcript turn either way.
+    address_gate_enabled: bool = False
+    address_gate_prompt: str = ""
+    """System prompt for the addressing gate. Should instruct the
+    model to answer EXACTLY ``yes`` or ``no`` (the engine strips
+    whitespace + lowercases + checks ``startswith("y")``). Wrappers
+    ship a sensible default and expose it as an ``ai_prompt``
+    ConfigParam so users can tune the threshold. Empty string with
+    ``address_gate_enabled=True`` is a config bug — the engine logs
+    a warning and treats every utterance as addressed."""
+
 
 # ── Outcome the engine returns ───────────────────────────────────────
 

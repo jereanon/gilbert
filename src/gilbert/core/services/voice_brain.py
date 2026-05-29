@@ -88,6 +88,50 @@ _ACTIVE_STATUS_VALUES: frozenset[str] = frozenset(
 )
 
 
+# Punctuation we strip before measuring a transcript's "real"
+# length. Mirrors what STT backends commonly emit at the tail of
+# an utterance ("uh." / "huh?" / "hm,") — those should all be
+# treated as their stripped form for the length / token-set checks.
+_NOISE_STRIP_CHARS: str = ".,!?;:-…\"'()[]{}"
+
+
+def _is_noise_utterance(
+    text: str,
+    *,
+    min_chars: int,
+    noise_words: frozenset[str],
+) -> str:
+    """Cheap, sync gate that flags filler-only / sub-threshold
+    transcripts. Returns an empty string when the utterance should
+    pass through, or a short reason code (``"too_short"`` /
+    ``"noise_only"``) when it should be dropped. The reason flows
+    into the log line so it's easy to tune the filter post-hoc by
+    grepping for the dropped utterances and seeing which gate
+    caught them.
+
+    Both checks are opt-in: ``min_chars=0`` skips the length gate
+    entirely, and ``noise_words=frozenset()`` skips the noise-set
+    gate. With both off this function always returns ``""``.
+    """
+    stripped = text.strip().strip(_NOISE_STRIP_CHARS).strip()
+    if min_chars > 0 and len(stripped) < min_chars:
+        return "too_short"
+    if noise_words:
+        # Tokenize on whitespace + punctuation. A transcript whose
+        # token SET is a subset of the noise set is filler-only:
+        # "uh" → drop, "uh um hmm" → drop, "uh, what time is it"
+        # → pass through (the noise tokens alone aren't the whole
+        # utterance).
+        tokens = {
+            t.strip(_NOISE_STRIP_CHARS).lower()
+            for t in stripped.split()
+            if t.strip(_NOISE_STRIP_CHARS)
+        }
+        if tokens and tokens.issubset(noise_words):
+            return "noise_only"
+    return ""
+
+
 def _status_value(event: Any) -> str | None:
     """Pull a normalized status string off whatever status-bearing event
     the session emitted. Returns ``None`` for events that don't carry a
@@ -396,13 +440,74 @@ class VoiceBrainService(Service):
         # with another greeting — caller hears Gilbert greet twice
         # back-to-back.
         remote_started_talking = False
+        # Last thing Gilbert actually said — used as context for the
+        # LLM addressing gate so it knows what conversation it's
+        # arbitrating. Empty until the first assistant turn lands.
+        last_assistant_text: str = ""
+        # In-flight ``_think_and_speak`` task spawned by the listen
+        # loop. The listen loop cancels this when a NEW user utterance
+        # passes the noise/address gates, so a half-formed response
+        # is dropped and the new utterance gets the floor. Without
+        # this, an utterance arriving mid-response would wait at
+        # ``think_speak_lock`` and the SPA's transcript timestamp
+        # would land 5-10s after the user actually spoke.
+        current_response_task: asyncio.Task[Any] | None = None
 
         # ── helpers — none of these touch persistence ─────────────────
 
         async def _record_turn(who: str, text: str) -> None:
+            nonlocal last_assistant_text
             ts = clock.now()
+            if who == "us":
+                last_assistant_text = text
             if config.on_transcript_turn is not None:
                 await config.on_transcript_turn(who, text, ts)
+
+        async def _is_addressed_to_us(user_text: str) -> bool:
+            """LLM addressing gate. Returns True when the AI thinks
+            the utterance is directed at the assistant, False when
+            it looks like background chatter / a remark to someone
+            else. Skipped (returns True) when:
+
+            - the feature is disabled in config,
+            - the AI provider is missing, or
+            - the gate prompt is empty (treated as a config bug —
+              we log a warning but pass everything through rather
+              than silently swallowing the conversation).
+            """
+            if not config.address_gate_enabled:
+                return True
+            if self._ai is None:
+                return True
+            if not config.address_gate_prompt:
+                log.warning(
+                    "address gate enabled but prompt is empty — "
+                    "treating every utterance as addressed (config bug)"
+                )
+                return True
+            # One-shot complete with a tiny token budget. The prompt
+            # is responsible for constraining the answer to yes/no;
+            # we treat any response that starts with 'y' as "yes".
+            gate_user = (
+                f"Previous assistant turn: {last_assistant_text!r}\n"
+                f"New user utterance: {user_text!r}\n"
+                f"Was this utterance directed at the assistant? "
+                f"Answer yes or no."
+            )
+            try:
+                resp = await self._ai.complete_one_shot(
+                    messages=[Message(role=MessageRole.USER, content=gate_user)],
+                    system_prompt=config.address_gate_prompt,
+                    max_tokens=8,
+                )
+            except Exception:
+                log.exception(
+                    "address gate AI call raised — failing open "
+                    "(treating as addressed)"
+                )
+                return True
+            answer = (getattr(resp, "text", "") or "").strip().lower()
+            return answer.startswith("y")
 
         async def _publish_event_via_provider(
             event_type: str, data: dict[str, Any]
@@ -655,20 +760,25 @@ class VoiceBrainService(Service):
 
             ctx = _make_brain_ctx()
             set_current_conversation_ctx(ctx)
-            try:
-                # Kick chat() off as a task so we can race a filler
-                # timer against it. ``asyncio.shield`` keeps
-                # ``wait_for``'s timeout from cancelling the chat
-                # itself — we only want the timeout to *notice*
-                # slowness, not abort the LLM mid-run.
-                chat_task: asyncio.Task[Any] = asyncio.create_task(
-                    self._ai_chat.chat(
-                        user_message=user_text,
-                        conversation_id=chat_conv_id,
-                        system_prompt=config.system_prompt,
-                        source=config.source,
-                    )
+            # Kick chat() off as a task so we can race a filler
+            # timer against it. ``asyncio.shield`` (used below) keeps
+            # ``wait_for``'s timeout from cancelling the chat — we
+            # only want the timeout to *notice* slowness, not abort
+            # the LLM mid-run. Barge-in cancellation from the listen
+            # loop is a DIFFERENT path that we DO want to honour —
+            # the outer try/finally below cancels chat_task when our
+            # own task gets cancelled, otherwise the shielded LLM
+            # would keep running (and billing) after the user has
+            # already moved on to a new utterance.
+            chat_task: asyncio.Task[Any] = asyncio.create_task(
+                self._ai_chat.chat(
+                    user_message=user_text,
+                    conversation_id=chat_conv_id,
+                    system_prompt=config.system_prompt,
+                    source=config.source,
                 )
+            )
+            try:
 
                 filler_enabled = (
                     opener_done
@@ -739,6 +849,17 @@ class VoiceBrainService(Service):
                 # First turn (opener) just completed — future turns
                 # are eligible for the filler.
                 opener_done = True
+            except asyncio.CancelledError:
+                # Barge-in (or session teardown) cancelled us. The
+                # ``asyncio.shield`` above keeps chat_task running
+                # past the filler-timeout cancel, so we have to
+                # cancel it explicitly here — otherwise the LLM
+                # keeps tokens flowing (and billing) until it
+                # finishes on its own. Re-raise so the outer task
+                # also sees the cancellation.
+                if not chat_task.done():
+                    chat_task.cancel()
+                raise
             except Exception:
                 log.exception("ai.chat() failed")
                 return
@@ -1098,7 +1219,7 @@ class VoiceBrainService(Service):
                 stop.set()
 
         async def _listen_loop() -> None:
-            nonlocal already_spoke, remote_started_talking
+            nonlocal already_spoke, remote_started_talking, current_response_task
             if self._transcription is None:
                 log.warning("Transcription unavailable — conversation continues TTS-only")
                 outcome["transcription_available"] = False
@@ -1323,7 +1444,46 @@ class VoiceBrainService(Service):
                                     continue
                             already_spoke = True
                             remote_started_talking = True
+                            # Record the user's transcript IMMEDIATELY,
+                            # before any gate or LLM dispatch — the SPA
+                            # timestamp should mirror when the user
+                            # actually spoke, not when we got around
+                            # to processing them. This was the entire
+                            # "queueing" symptom users saw: the engine
+                            # used to await _think_and_speak inline,
+                            # which blocked the listen loop for the
+                            # full TTS playback before _record_turn
+                            # for the NEXT utterance could fire.
                             await _record_turn("them", text)
+
+                            # Layer 1 — cheap synchronous noise filter.
+                            noise_reason = _is_noise_utterance(
+                                text,
+                                min_chars=config.min_address_chars,
+                                noise_words=config.noise_words,
+                            )
+                            if noise_reason:
+                                log.info(
+                                    "address gate: dropping transcript "
+                                    "(reason=%s text=%r)",
+                                    noise_reason,
+                                    text[:80],
+                                )
+                                continue
+
+                            # Layer 2 — LLM addressing gate (opt-in).
+                            # Awaited inline because dropping here is
+                            # the whole point; spawning the gate as a
+                            # task and racing it against dispatch
+                            # defeats the win.
+                            if not await _is_addressed_to_us(text):
+                                log.info(
+                                    "address gate: dropping transcript "
+                                    "(reason=not_addressed text=%r)",
+                                    text[:80],
+                                )
+                                continue
+
                             # Phone-call path: append to the engine's
                             # messages list; complete_one_shot will see it.
                             # Voice-agent path: ai.chat() takes the user
@@ -1335,7 +1495,66 @@ class VoiceBrainService(Service):
                                         role=MessageRole.USER, content=text
                                     )
                                 )
-                            await _think_and_speak(text)
+
+                            # True barge-in: if there's already an
+                            # in-flight response task from a previous
+                            # utterance, cancel it AND the in-flight
+                            # TTS playback before launching the new
+                            # turn. Without this the lock serializes
+                            # turns and the user's new utterance
+                            # piles up behind the old response.
+                            if (
+                                current_response_task is not None
+                                and not current_response_task.done()
+                            ):
+                                log.info(
+                                    "barge-in: cancelling in-flight "
+                                    "response task for new utterance"
+                                )
+                                current_response_task.cancel()
+                                if speaking.active and not speaking.cancelled:
+                                    speaking.cancelled = True
+                                    speaking.cancel_event.set()
+                                    try:
+                                        asyncio.create_task(
+                                            session.audio_out.clear()
+                                        )
+                                    except Exception:
+                                        log.debug(
+                                            "audio_out.clear() raised "
+                                            "during barge-in",
+                                            exc_info=True,
+                                        )
+
+                            # Spawn — don't await. The listen loop has
+                            # to stay responsive so the NEXT user
+                            # utterance arrives at _record_turn within
+                            # ms instead of being stuck behind the
+                            # current LLM + TTS round.
+                            current_response_task = asyncio.create_task(
+                                _think_and_speak(text),
+                                name="voice_brain.respond",
+                            )
+
+                            def _log_response_task_error(
+                                t: asyncio.Task[Any],
+                            ) -> None:
+                                # Surface unexpected exceptions from
+                                # the fire-and-forget response task.
+                                # Cancellation is the expected path on
+                                # barge-in / teardown and is silenced.
+                                if t.cancelled():
+                                    return
+                                exc = t.exception()
+                                if exc is not None:
+                                    log.error(
+                                        "voice_brain.respond task raised",
+                                        exc_info=exc,
+                                    )
+
+                            current_response_task.add_done_callback(
+                                _log_response_task_error
+                            )
                         elif isinstance(ev, SpeechEnded):
                             pass
                 except Exception:
@@ -1483,6 +1702,19 @@ class VoiceBrainService(Service):
                 ],
             )
         finally:
+            # Cancel any dangling response task spawned by the
+            # listen loop so it doesn't keep the LLM running after
+            # the session ends (and bill us for tokens nobody
+            # hears).
+            if (
+                current_response_task is not None
+                and not current_response_task.done()
+            ):
+                current_response_task.cancel()
+                try:
+                    await current_response_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             try:
                 await session.end_session()
             except Exception:
