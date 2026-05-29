@@ -521,8 +521,15 @@ class VoiceBrainService(Service):
                     idx = pos + 1
 
             # LLM gate — fail-open on everything except an explicit
-            # "no" / "not addressed".
+            # "no" / "not addressed". The assistant's name goes in
+            # the user message so the model can tell "Gilbert, …"
+            # (addressed to us) apart from "Kim, …" (addressed to
+            # someone else) — same lexical pattern, opposite verdict.
+            assistant_name_for_gate = (
+                config.assistant_name or "the assistant"
+            )
             gate_user = (
+                f"Assistant name: {assistant_name_for_gate}\n"
                 f"Previous assistant turn: {last_assistant_text!r}\n"
                 f"New user utterance: {user_text!r}\n"
                 f"Should the assistant respond to this utterance? "
