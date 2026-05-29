@@ -541,6 +541,43 @@ class ConversationConfig:
     # the LLM gate when ``address_gate_enabled=True``).
     assistant_name: str = ""
 
+    # ── Echo guard ───────────────────────────────────────────────────
+    #
+    # When Gilbert speaks via the browser/speakers and the user
+    # doesn't wear headphones, the mic picks up the tail end of
+    # Gilbert's own TTS — especially when barge-in cancels mid-
+    # utterance and the browser keeps playing the buffered audio
+    # for a few hundred ms before the clear() takes effect. Scribe
+    # then commits transcripts like "It's-" or "The glass appears
+    # to be-" (cut-off ending) or paraphrases of Gilbert's own
+    # answer ("I mean, I thought the sky was always blue") which
+    # the engine treats as user turns.
+    #
+    # The old diarization-based echo suppression can't catch this:
+    # Scribe Realtime never populates ``speaker_id``, so the
+    # speaker classifier short-circuits on empty labels and every
+    # transcript flows through.
+    #
+    # The content-based echo guard runs in the FinalTranscript
+    # handler. When set > 0.0 and a transcript arrives within
+    # ``echo_guard_window_seconds`` of the engine's last TTS
+    # playback, three checks fire (most specific first):
+    #
+    #   - Trailing dash (``It's-``, ``The glass appears to be-``) →
+    #     drop. Strong signal of audio cut off mid-word.
+    #   - Substring of recent assistant text → drop.
+    #   - Token-overlap with recent assistant text ≥
+    #     ``echo_guard_token_overlap_threshold`` → drop.
+    #
+    # Default 0.0 = off so phone-call brains (which have carrier-
+    # side echo cancellation) don't pick this up. Voice-agent and
+    # any open-mic wrapper should turn it on.
+    echo_guard_window_seconds: float = 0.0
+    echo_guard_token_overlap_threshold: float = 0.5
+    """Drop a transcript when ≥ this fraction of its tokens appear
+    in the recent assistant text. 0.5 catches half-or-more matches;
+    1.0 only drops exact subsets. Lower = more aggressive."""
+
 
 # ── Outcome the engine returns ───────────────────────────────────────
 

@@ -16,7 +16,10 @@ it entirely.
 
 from __future__ import annotations
 
-from gilbert.core.services.voice_brain import _is_noise_utterance
+from gilbert.core.services.voice_brain import (
+    _is_likely_echo,
+    _is_noise_utterance,
+)
 from gilbert.interfaces.conversation import ConversationConfig
 
 
@@ -104,3 +107,94 @@ class _DummyBrain:
 
     async def handle_brain_tool(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
         return None
+
+
+# ── _is_likely_echo ──────────────────────────────────────────────────
+
+
+def test_echo_cut_off_trailing_dash_drops() -> None:
+    """Scribe commits ``It's-`` / ``The glass appears to be-`` when
+    Gilbert's TTS gets cut off mid-word by a barge-in — the trailing
+    dash is the strongest echo signal we have."""
+    assert _is_likely_echo("It's-", recent_assistant_texts=[], token_overlap_threshold=0.5) == "cut_off"
+    assert _is_likely_echo(
+        "The glass appears to be-",
+        recent_assistant_texts=[],
+        token_overlap_threshold=0.5,
+    ) == "cut_off"
+
+
+def test_echo_substring_drops() -> None:
+    """The transcript is a verbatim chunk of what Gilbert just said."""
+    assert _is_likely_echo(
+        "blue because of rayleigh scattering",
+        recent_assistant_texts=[
+            "The sky is blue because of Rayleigh scattering, which "
+            "filters out longer wavelengths."
+        ],
+        token_overlap_threshold=0.5,
+    ) == "substring"
+
+
+def test_echo_token_overlap_drops() -> None:
+    """Paraphrase-style echo where Scribe captured most of Gilbert's
+    words but rearranged / missed a couple."""
+    assert _is_likely_echo(
+        "I mean, I thought the sky was always blue.",
+        recent_assistant_texts=[
+            "The sky is blue because of Rayleigh scattering. "
+            "I always thought the sky was blue too."
+        ],
+        token_overlap_threshold=0.5,
+    ) == "token_overlap"
+
+
+def test_echo_genuine_user_passes() -> None:
+    """A real user follow-up that doesn't overlap with the assistant's
+    last turn should NOT trip the echo guard."""
+    assert _is_likely_echo(
+        "what time is it",
+        recent_assistant_texts=[
+            "The sky is blue because of Rayleigh scattering."
+        ],
+        token_overlap_threshold=0.5,
+    ) == ""
+
+
+def test_echo_empty_recent_passes() -> None:
+    """No recent assistant text → no echo possible (except the
+    trailing-dash heuristic, which doesn't need history)."""
+    assert _is_likely_echo(
+        "what time is it",
+        recent_assistant_texts=[],
+        token_overlap_threshold=0.5,
+    ) == ""
+
+
+def test_echo_threshold_zero_one_only_exact() -> None:
+    """Threshold tuning: at 1.0 only complete subsets of the
+    assistant text count."""
+    # Two of three user tokens appear in the assistant text → 0.67.
+    # With threshold=1.0, doesn't trip.
+    assert _is_likely_echo(
+        "blue sky maybe",  # two of three tokens in assistant text
+        recent_assistant_texts=["The sky is blue"],
+        token_overlap_threshold=1.0,
+    ) == ""
+    # Same input with threshold=0.5 (default) DOES trip.
+    assert _is_likely_echo(
+        "blue sky maybe",
+        recent_assistant_texts=["The sky is blue"],
+        token_overlap_threshold=0.5,
+    ) == "token_overlap"
+
+
+def test_echo_config_defaults_off() -> None:
+    """Phone-call brain must not pick up echo guard by accident —
+    carrier-side echo cancellation makes it unnecessary AND
+    potentially harmful (drops legitimate user turns)."""
+    cfg = ConversationConfig(
+        system_prompt="x",
+        brain_tool_provider=_DummyBrain(),  # type: ignore[arg-type]
+    )
+    assert cfg.echo_guard_window_seconds == 0.0

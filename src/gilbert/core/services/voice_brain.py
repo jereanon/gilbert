@@ -132,6 +132,77 @@ def _is_noise_utterance(
     return ""
 
 
+def _is_likely_echo(
+    text: str,
+    *,
+    recent_assistant_texts: list[str],
+    token_overlap_threshold: float,
+) -> str:
+    """Detect transcripts that are likely echoes of the assistant's
+    own recent TTS playback bleeding back through the mic.
+
+    Returns one of:
+        ``""`` — not an echo, dispatch normally.
+        ``"cut_off"`` — ends with a dash (interrupted-audio signature).
+        ``"substring"`` — text appears verbatim inside a recent
+          assistant utterance.
+        ``"token_overlap"`` — ≥ ``token_overlap_threshold`` fraction
+          of the transcript's tokens appear in a recent assistant
+          utterance.
+
+    The caller is responsible for gating this on a time window —
+    this function only does content analysis. ``recent_assistant_texts``
+    should be only the assistant utterances within the echo window.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    stripped_no_punct = stripped.strip(_NOISE_STRIP_CHARS).strip()
+
+    # Cut-off ending — interrupted audio. The trailing dash is what
+    # Scribe emits for utterances that were truncated mid-word, which
+    # is exactly what happens when ``audio_out.clear()`` interrupts
+    # Gilbert's TTS playback mid-syllable.
+    if stripped.endswith("-"):
+        return "cut_off"
+
+    if not recent_assistant_texts:
+        return ""
+
+    lowered = stripped_no_punct.lower()
+    user_tokens = {
+        t.strip(_NOISE_STRIP_CHARS).lower()
+        for t in lowered.split()
+        if t.strip(_NOISE_STRIP_CHARS)
+    }
+    if not user_tokens:
+        return ""
+
+    for recent in recent_assistant_texts:
+        if not recent:
+            continue
+        recent_lower = recent.lower()
+        # Substring check — the user transcript appears verbatim in
+        # something Gilbert just said.
+        if lowered and lowered in recent_lower:
+            return "substring"
+        # Token-overlap — fraction of user tokens that appear in the
+        # assistant text. Catches paraphrase-style echoes where the
+        # mic captured most-but-not-all of Gilbert's words.
+        recent_tokens = {
+            t.strip(_NOISE_STRIP_CHARS).lower()
+            for t in recent_lower.split()
+            if t.strip(_NOISE_STRIP_CHARS)
+        }
+        if not recent_tokens:
+            continue
+        overlap = len(user_tokens & recent_tokens) / len(user_tokens)
+        if overlap >= token_overlap_threshold:
+            return "token_overlap"
+
+    return ""
+
+
 def _status_value(event: Any) -> str | None:
     """Pull a normalized status string off whatever status-bearing event
     the session emitted. Returns ``None`` for events that don't carry a
@@ -444,6 +515,14 @@ class VoiceBrainService(Service):
         # LLM addressing gate so it knows what conversation it's
         # arbitrating. Empty until the first assistant turn lands.
         last_assistant_text: str = ""
+        # Ring of recent assistant utterances with the wall-clock time
+        # each was LAST audible through the speakers (whether normal
+        # completion or barge-in cancel). Used by the echo guard to
+        # decide whether an inbound user transcript could be a tail-
+        # of-Gilbert echo from the speakers. Kept small (last 3
+        # turns) — older audio has decayed past any reasonable echo
+        # window. Each entry: (text, audible_until_seconds).
+        recent_assistant_audible: list[tuple[str, float]] = []
         # In-flight ``_think_and_speak`` task spawned by the listen
         # loop. The listen loop cancels this when a NEW user utterance
         # passes the noise/address gates, so a half-formed response
@@ -771,6 +850,21 @@ class VoiceBrainService(Service):
                 # True throughout the wait is what makes the
                 # interrupt path actually work.
                 speaking.active = False
+                # Record this utterance for the echo guard. The
+                # ``audible_until`` timestamp marks when speakers
+                # last produced this audio — used by the FinalTranscript
+                # handler to decide whether an inbound user transcript
+                # could be a tail-of-Gilbert echo. Even on barge-in
+                # cancel the browser keeps playing buffered audio for
+                # a few hundred ms, so we mark it audible right up to
+                # the cancel moment (the echo guard's window covers
+                # the residual buffer).
+                if text and config.echo_guard_window_seconds > 0.0:
+                    recent_assistant_audible.append((text, clock.now()))
+                    # Keep only the last 3 — older audio is past any
+                    # plausible echo window.
+                    if len(recent_assistant_audible) > 3:
+                        del recent_assistant_audible[:-3]
             # End-of-utterance signal for the wrapper. Voice-agent uses
             # this to reset its silence timer at the moment Gilbert
             # quiets down rather than when he STARTS speaking (which is
@@ -1515,6 +1609,38 @@ class VoiceBrainService(Service):
                                     text[:80],
                                 )
                                 continue
+
+                            # Layer 1.5 — echo guard. When voice-agent
+                            # / open-mic sessions play TTS through
+                            # speakers and the mic picks up the tail,
+                            # Scribe transcribes Gilbert's own voice as
+                            # the user. Filter those out by content +
+                            # recency match against recent assistant
+                            # utterances.
+                            if config.echo_guard_window_seconds > 0.0:
+                                now_t = clock.now()
+                                window = config.echo_guard_window_seconds
+                                fresh_assistant_texts = [
+                                    txt
+                                    for txt, audible_at in recent_assistant_audible
+                                    if now_t - audible_at <= window
+                                ]
+                                if fresh_assistant_texts:
+                                    echo_reason = _is_likely_echo(
+                                        text,
+                                        recent_assistant_texts=fresh_assistant_texts,
+                                        token_overlap_threshold=(
+                                            config.echo_guard_token_overlap_threshold
+                                        ),
+                                    )
+                                    if echo_reason:
+                                        log.info(
+                                            "echo guard: dropping transcript "
+                                            "(reason=%s text=%r)",
+                                            echo_reason,
+                                            text[:80],
+                                        )
+                                        continue
 
                             # Layer 2 — LLM addressing gate (opt-in).
                             # Awaited inline because dropping here is
