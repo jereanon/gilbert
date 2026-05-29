@@ -464,16 +464,23 @@ class VoiceBrainService(Service):
                 await config.on_transcript_turn(who, text, ts)
 
         async def _is_addressed_to_us(user_text: str) -> bool:
-            """LLM addressing gate. Returns True when the AI thinks
-            the utterance is directed at the assistant, False when
-            it looks like background chatter / a remark to someone
-            else. Skipped (returns True) when:
+            """LLM addressing gate. Returns True when the utterance
+            should be dispatched, False ONLY when we're confident it
+            shouldn't be. The gate FAILS OPEN at every layer:
 
-            - the feature is disabled in config,
-            - the AI provider is missing, or
-            - the gate prompt is empty (treated as a config bug —
-              we log a warning but pass everything through rather
-              than silently swallowing the conversation).
+            - feature disabled → True
+            - AI provider missing → True
+            - prompt empty (config bug) → True + warn
+            - assistant's name appears as a whole word → True
+              (deterministic fast-path; LLM call skipped)
+            - LLM call raises → True
+            - LLM response doesn't start with 'n' / contain 'not' →
+              True (verbose / ambiguous replies dispatch)
+            - LLM response IS an explicit no → False
+
+            The asymmetry matters: a gate that silently swallows a
+            real question is worse than one that occasionally
+            responds to an aside.
             """
             if not config.address_gate_enabled:
                 return True
@@ -485,13 +492,40 @@ class VoiceBrainService(Service):
                     "treating every utterance as addressed (config bug)"
                 )
                 return True
-            # One-shot complete with a tiny token budget. The prompt
-            # is responsible for constraining the answer to yes/no;
-            # we treat any response that starts with 'y' as "yes".
+
+            # Deterministic fast-path: when the user literally says
+            # the assistant's name, dispatch without burning a gate
+            # call. Word-boundary match on the lowercased name so
+            # "gilbertine" doesn't count but "Gilbert, " does.
+            name = (config.assistant_name or "").strip().lower()
+            if name:
+                lowered = user_text.lower()
+                # Cheap whole-word search — find every occurrence
+                # of the name, check neighbouring chars are non-word.
+                idx = 0
+                while True:
+                    pos = lowered.find(name, idx)
+                    if pos < 0:
+                        break
+                    before = lowered[pos - 1] if pos > 0 else " "
+                    after_pos = pos + len(name)
+                    after = lowered[after_pos] if after_pos < len(lowered) else " "
+                    if not before.isalnum() and not after.isalnum():
+                        log.info(
+                            "address gate: name-mention fast-path "
+                            "(assistant_name=%r matched text=%r)",
+                            name,
+                            user_text[:80],
+                        )
+                        return True
+                    idx = pos + 1
+
+            # LLM gate — fail-open on everything except an explicit
+            # "no" / "not addressed".
             gate_user = (
                 f"Previous assistant turn: {last_assistant_text!r}\n"
                 f"New user utterance: {user_text!r}\n"
-                f"Was this utterance directed at the assistant? "
+                f"Should the assistant respond to this utterance? "
                 f"Answer yes or no."
             )
             try:
@@ -507,7 +541,11 @@ class VoiceBrainService(Service):
                 )
                 return True
             answer = (getattr(resp, "text", "") or "").strip().lower()
-            return answer.startswith("y")
+            # Drop only on explicit no — anything else dispatches.
+            # ``no``, ``no.``, ``not addressed``, ``no, this is …``
+            # all start with 'n'. Empty answer / verbose ramble / a
+            # legitimate "yes" / unclear → dispatch.
+            return not (answer.startswith("n") or "not addressed" in answer)
 
         async def _publish_event_via_provider(
             event_type: str, data: dict[str, Any]

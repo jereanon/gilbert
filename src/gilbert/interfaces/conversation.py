@@ -519,12 +519,27 @@ class ConversationConfig:
     address_gate_enabled: bool = False
     address_gate_prompt: str = ""
     """System prompt for the addressing gate. Should instruct the
-    model to answer EXACTLY ``yes`` or ``no`` (the engine strips
-    whitespace + lowercases + checks ``startswith("y")``). Wrappers
-    ship a sensible default and expose it as an ``ai_prompt``
-    ConfigParam so users can tune the threshold. Empty string with
-    ``address_gate_enabled=True`` is a config bug — the engine logs
-    a warning and treats every utterance as addressed."""
+    model to answer ``yes`` (addressed) or ``no`` (not addressed).
+    The gate FAILS OPEN — only an explicit ``no`` / ``not addressed``
+    drops the utterance. Anything ambiguous (empty response, error,
+    verbose reply that doesn't start with no) dispatches. The
+    asymmetry matches the noise filter's contract: a gate that
+    silently swallows real questions is worse than a gate that
+    occasionally responds to an aside.
+
+    Wrappers ship a sensible default and expose this as an
+    ``ai_prompt`` ConfigParam so users can tune the threshold.
+    Empty string with ``address_gate_enabled=True`` is a config
+    bug — the engine logs a warning and treats every utterance
+    as addressed."""
+
+    # **Deterministic fast-path** — when the utterance contains the
+    # assistant's name as a whole word, skip the LLM gate entirely
+    # and dispatch. Catches the obvious "Hey Gilbert" / "Gilbert,
+    # are you there?" cases without burning a gate-call. Empty
+    # string disables the fast-path (every utterance flows through
+    # the LLM gate when ``address_gate_enabled=True``).
+    assistant_name: str = ""
 
 
 # ── Outcome the engine returns ───────────────────────────────────────
