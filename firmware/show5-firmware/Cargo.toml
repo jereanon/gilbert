@@ -6,11 +6,11 @@ authors = ["Jeremy <jeremy@possiblyfaulty.com>"]
 description = "Rust thin-client firmware for the IoTeikXgo 5\" ESP32-P4 display, paired with a Gilbert instance"
 license = "MIT"
 resolver = "2"
-rust-version = "1.77"
+rust-version = "1.86"
 
 [[bin]]
 name = "show5-firmware"
-harness = false  # do not use the built-in cargo test harness
+harness = false
 
 [profile.release]
 opt-level = "s"
@@ -20,36 +20,51 @@ debug = false
 panic = "abort"
 overflow-checks = false
 incremental = false
-strip = true
 
 [profile.dev]
-debug = true
-opt-level = "z"
+opt-level = "s"
+panic = "abort"
+debug = 2
+debug-assertions = true
+overflow-checks = false
 
-# Phase 0 esp-idf-svc track. esp-idf-svc + esp-idf-hal + esp-idf-sys pull
-# the full ESP-IDF C SDK under embuild — first build is slow (5-10 min on
-# this Mac) but every rebuild after is fast. We pin minor versions; ESP-IDF
-# itself is selected via ESP_IDF_VERSION in .cargo/config.toml.
+# esp-hal track — pure Rust, no_std, no ESP-IDF C SDK. Chosen after the
+# esp-idf-svc track reproduced an unfixable upstream panic during
+# multicore startup on this chip's ROM revision (see plan doc's
+# "Phase 0 spike result" section).
+#
+# The dependency tree is intentionally small — esp-hal for the
+# peripherals, esp-println for the boot log, esp-backtrace for clean
+# panic dumps, esp-alloc so libcore types we use (Box, Vec) have a
+# heap. Embassy is added for async/await; we'll need it for the WS
+# client.
 [dependencies]
-esp-idf-svc = { version = "0.52", default-features = false, features = [
-    "binstart",
-    "alloc",
-    "std",
+# Pin to the esp-rs git monorepo's master: ``esp-hal 1.1`` on crates.io
+# supports ESP32-P4 but the satellite crates (esp-backtrace, esp-println,
+# esp-alloc) haven't released P4 features yet. Master has them. Replace
+# the ``git = …`` pins with crates.io versions once they cut a release.
+esp-hal = { git = "https://github.com/esp-rs/esp-hal", features = ["esp32p4", "unstable"] }
+esp-backtrace = { git = "https://github.com/esp-rs/esp-hal", features = [
+    "esp32p4",
+    "panic-handler",
+    "println",
 ] }
-anyhow = "1.0"
+esp-println = { git = "https://github.com/esp-rs/esp-hal", default-features = false, features = [
+    "esp32p4",
+    "log-04",
+    # ``jtag-serial`` routes output to the chip's native USB
+    # Serial-JTAG peripheral instead of UART0. The IoTeikXgo board
+    # has TWO USB-C ports: one wired to a CH343 USB-UART, the other
+    # to the P4's native USB-OTG. With this feature, our println
+    # output goes to the native-USB port (a separate /dev/cu.*
+    # appears on the Mac when firmware brings up USB).
+    "jtag-serial",
+] }
+esp-alloc = { git = "https://github.com/esp-rs/esp-hal" }
+# Provides ``esp_app_desc!()`` — the ESP-IDF-compatible app descriptor
+# that the boot ROM looks for in the application image. Without it
+# espflash refuses to write the binary ("ESP-IDF application
+# description missing").
+esp-bootloader-esp-idf = { git = "https://github.com/esp-rs/esp-hal", features = ["esp32p4"] }
+
 log = "0.4"
-
-[build-dependencies]
-embuild = "0.33"
-
-# Pull esp-idf-svc / esp-idf-hal / esp-idf-sys from their git master
-# instead of the crates.io releases. The vanilla esp-idf-template ships
-# this same patch block, and for ESP32-P4 it's load-bearing: the
-# crates.io releases predate fixes for P4-specific startup / multicore
-# paths (boot panic at ``cpu_start: Multicore app`` reproduces with the
-# crates.io 0.52 + 0.46 + 0.37 combo even with the right sdkconfig).
-# Drop this once the crates.io releases catch up.
-[patch.crates-io]
-esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys.git" }
-esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal.git" }
-esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }

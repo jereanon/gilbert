@@ -1,8 +1,8 @@
 [toolchain]
-# ESP32-P4 is RISC-V; stable Rust supports the underlying target but
-# ``-Z build-std`` (needed to rebuild libstd against ESP-IDF's newlib)
-# requires nightly. The vanilla esp-idf-template just tracks "nightly"
-# without pinning a date — easier to keep moving, less likely to drift
-# from the esp-rs project's tested combination.
+# esp-hal needs ``-Z build-std`` (rebuild core+alloc against our target
+# memory model) which requires nightly. We track plain nightly — the
+# esp-hal project tests against current nightly so this stays in sync
+# with their CI.
 channel = "nightly"
 components = ["rust-src"]
+targets = ["riscv32imafc-unknown-none-elf"]
