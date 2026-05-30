@@ -187,6 +187,41 @@ These get answered as Phase 0 progresses. Capture the choice in this doc when ma
   will be hand-rolled) and lvgl-rs std bindings (use `embedded-graphics`
   / `mipidsi` instead), but boot reliability matters more right now.
 
+  **Phase 0 esp-hal HITL update (2026-05-29 late evening):** also broken
+  upstream for this chip. esp-hal master at commit `0c42fd92`
+  (`esp-hal v1.1.0`-master) builds clean, but at runtime the bootloader
+  loads the image, jumps to the entry point, and the app then silently
+  hangs — no UART output, no GPIO toggle on any of seven likely LED
+  pins. ~6s later the LP watchdog resets the chip
+  (`rst:0x10 (CHIP_LP_WDT_RESET)`) and the loop repeats.
+  **Pristine upstream** `esp-rs/esp-hal/examples/hello_world` built for
+  `esp32p4` and flashed directly reproduces the hang identically — so
+  this is NOT our config, it's esp-hal master + ESP32-P4 v1.3 + ROM
+  `esp32p4-eco2-20240710` being currently broken together.
+
+  ELF layout looks correct (entry at `_abs_start` in `.text`,
+  segments map to HP flash + HP SRAM at expected addresses), so the
+  hang is during or after `_start` / `esp_hal::init()`. Likely culprit:
+  early HP_SYS / clock / PMU bring-up that needs PSRAM init or a
+  config we're missing — but since upstream's own example hits it too,
+  this is an esp-rs upstream issue rather than something we can fix
+  ourselves.
+
+  **Decision tree from here** (next session):
+  1. File issue upstream at https://github.com/esp-rs/esp-hal with
+     this evidence; check if there's already a known-broken P4
+     window.
+  2. Try `esp-p4-mini-bootloader` (pure Rust bootloader on crates.io)
+     — bypasses ESP-IDF bootloader entirely; might dodge whatever
+     handoff is broken.
+  3. Validate the BOARD itself with a known-working firmware: flash
+     an Arduino-ESP32 P4 blink or ESP-IDF C `hello_world` to confirm
+     the hardware is fine. If the C/Arduino path works, the issue is
+     specifically Rust + esp-hal; if it doesn't, the board may have a
+     hardware-level boot issue.
+  4. Last resort: pin esp-hal to an older tagged release and see if
+     P4 worked there.
+
   Toolchain side notes (preserved for the esp-hal track too):
   - Board's USB-UART is a WCH CH343. macOS needs the
     **CH34xVCPDriver** from the Mac App Store; without it the chip
