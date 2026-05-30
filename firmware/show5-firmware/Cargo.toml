@@ -52,13 +52,14 @@ esp-backtrace = { git = "https://github.com/esp-rs/esp-hal", features = [
 esp-println = { git = "https://github.com/esp-rs/esp-hal", default-features = false, features = [
     "esp32p4",
     "log-04",
-    # ``jtag-serial`` routes output to the chip's native USB
-    # Serial-JTAG peripheral instead of UART0. The IoTeikXgo board
-    # has TWO USB-C ports: one wired to a CH343 USB-UART, the other
-    # to the P4's native USB-OTG. With this feature, our println
-    # output goes to the native-USB port (a separate /dev/cu.*
-    # appears on the Mac when firmware brings up USB).
-    "jtag-serial",
+    "colors",
+    "critical-section",
+    # ``uart`` routes println output to UART0 — the IoTeikXgo board
+    # wires the CH343 USB-UART to UART0 (default GPIO37 TX / GPIO38
+    # RX on the P4). Tried ``jtag-serial`` first but the board's
+    # second USB-C port either isn't wired to the P4's native USB
+    # peripheral or doesn't enumerate without explicit USB init.
+    "uart",
 ] }
 esp-alloc = { git = "https://github.com/esp-rs/esp-hal" }
 # Provides ``esp_app_desc!()`` — the ESP-IDF-compatible app descriptor

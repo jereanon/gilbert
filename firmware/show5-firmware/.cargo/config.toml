@@ -11,10 +11,10 @@ target = "riscv32imafc-unknown-none-elf"
 # direct bootloader works fine. ``-p`` pins the port; adjust for your
 # environment.
 runner = "espflash flash --no-stub -p /dev/cu.wchusbserial10 --monitor"
+# Linker scripts (``-Tlinkall.x`` etc.) are passed via build.rs so
+# cargo emits them with the correct rerun-if-changed metadata. Don't
+# duplicate them here.
 rustflags = [
-    # esp-hal provides its own linker scripts and runtime; tell the
-    # linker to use the riscv runtime + esp-hal's memory layout.
-    "-C", "link-arg=-Tlinkall.x",
     # Workaround for an LLVM bug around the C extension on rv32imafc
     # described in the esp-hal docs. Without this, atomic intrinsics
     # don't link correctly.

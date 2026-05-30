@@ -18,6 +18,9 @@
 extern crate alloc;
 
 use esp_backtrace as _; // panic handler + backtrace dumper
+use esp_hal::delay::Delay;
+use esp_hal::gpio::{Level, Output, OutputConfig};
+use esp_hal::time::Duration;
 use esp_println::println;
 
 // Embed the ESP-IDF-compatible app descriptor at the start of the
@@ -26,15 +29,17 @@ use esp_println::println;
 // boot the image anyway.
 esp_bootloader_esp_idf::esp_app_desc!();
 
+// GPIO sweep for the onboard LED. Different IoTeikXgo board revisions
+// wire a status LED to different pins; without a schematic we toggle
+// a few likely candidates each cycle. Whichever one is the real LED
+// will blink at ~1 Hz; the rest get harmlessly poked.
+const LED_CANDIDATES: &[u8] = &[15, 22, 48, 23, 21, 38, 11];
+
 #[esp_hal::main]
 fn main() -> ! {
-    // Initialize the chip + peripherals with esp-hal's defaults. This
-    // sets up the clocks, the system controller, and the boot-time
-    // configuration. Without this, peripheral access faults.
-    let _peripherals = esp_hal::init(esp_hal::Config::default());
+    // Initialize the chip + peripherals with esp-hal's defaults.
+    let peripherals = esp_hal::init(esp_hal::Config::default());
 
-    // 8 KiB heap for early allocations (log formatting, etc.). Bumps
-    // come later when libraries demand more.
     esp_alloc::heap_allocator!(size: 8 * 1024);
 
     println!(
@@ -43,16 +48,39 @@ fn main() -> ! {
     );
     println!("target: ESP32-P4 (riscv32imafc-unknown-none-elf, no_std)");
 
+    // Set up an LED-blink fallback: even with no console, a blinking
+    // GPIO proves the chip is running our code. Drive ALL candidate
+    // pins; the one that's wired to the LED will respond.
+    let cfg = OutputConfig::default();
+    let mut leds = [
+        Output::new(peripherals.GPIO15, Level::Low, cfg),
+        Output::new(peripherals.GPIO22, Level::Low, cfg),
+        Output::new(peripherals.GPIO48, Level::Low, cfg),
+        Output::new(peripherals.GPIO23, Level::Low, cfg),
+        Output::new(peripherals.GPIO21, Level::Low, cfg),
+        Output::new(peripherals.GPIO38, Level::Low, cfg),
+        Output::new(peripherals.GPIO11, Level::Low, cfg),
+    ];
+
+    println!(
+        "LED sweep — toggling GPIOs {:?} every 500ms",
+        LED_CANDIDATES
+    );
+
+    let delay = Delay::new();
     let mut tick: u32 = 0;
+    let mut on = false;
     loop {
-        // ~1 Hz heartbeat. Crude busy-wait — replaced by an embassy
-        // `Timer::after_millis(1000)` once we add the executor.
-        for _ in 0..40_000_000 {
-            core::hint::spin_loop();
+        on = !on;
+        let level = if on { Level::High } else { Level::Low };
+        for led in leds.iter_mut() {
+            led.set_level(level);
         }
+        delay.delay(Duration::from_millis(500));
         tick = tick.wrapping_add(1);
-        if tick % 10 == 0 {
-            println!("alive — uptime ~{}s", tick);
+        if tick % 4 == 0 {
+            // Every ~2 s.
+            println!("alive — tick {}", tick);
         }
     }
 }
