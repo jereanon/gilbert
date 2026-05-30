@@ -156,13 +156,47 @@ These get answered as Phase 0 progresses. Capture the choice in this doc when ma
 
   **Phase 0 spike result (esp-idf-svc track, 2026-05-29):** scaffolded, builds
   cleanly for `riscv32imafc-esp-espidf` on `esp-idf-svc 0.52` / `esp-idf-hal 0.46`
-  / `esp-idf-sys 0.37` + ESP-IDF v5.4. First build (cold) ~5 min including ESP-IDF
-  download + LLVM toolchain. Incremental rebuilds <50 s. Binary size 724 KB
-  (debug-stripped release), comfortably inside a 2 MiB OTA slot. Toolchain cache
-  is 5.1 GB under `.embuild/` (one-time). No hardware-in-the-loop yet — final
-  pick happens after Phase 0 step 4 (Wi-Fi) and step 5 (WS echo) confirm the
-  C6 hosted Wi-Fi path actually works. Plan B (esp-hal) deferred until either
-  the C6 hosted path stalls or the no_std footprint becomes attractive.
+  / `esp-idf-sys 0.37`. Cold build ~5 min including ESP-IDF download + LLVM
+  toolchain. Incremental rebuilds <50 s. Binary size 724 KB (release, stripped),
+  fits in a 2 MiB OTA slot. Toolchain cache 5.1 GB under `.embuild/` (one-time).
+
+  **Phase 0 spike result (esp-idf-svc, hardware-in-the-loop, 2026-05-29):**
+  ❌ does not boot on the IoTeikXgo board's chip (ESP32-P4 v1.3,
+  ROM `esp32p4-eco2-20240710`).
+
+  - IDF v5.4: app crashes immediately after `cpu_start: Multicore app`
+    with Guru Meditation (instruction access fault at MEPC `0x00c50512` —
+    junk PC pointing into LP SRAM, indicates corrupt C++ ctor table
+    during multicore startup).
+  - IDF v5.5: same crash, slight variation (Store access fault, MEPC
+    `0x30100536`, MTVAL `0x60` → null-ptr store from LP-SRAM code).
+  - IDF v5.5.3: bootloader's first instruction faults as illegal —
+    ROM/bootloader ABI mismatch with this specific chip revision.
+  - **Crash reproduces with pristine upstream** `esp-idf-template`
+    generated for `esp32p4`, so it isn't anything in our config: this
+    is an upstream regression / chip-ROM mismatch.
+
+  Tried: stack-size bumps (`CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192`),
+  `[patch.crates-io]` against esp-idf-svc/hal/sys git master, PSRAM
+  off/on, brownout off, console baud pinned. None fixed it.
+
+  **Decision: switch to `esp-hal` (no_std) for the firmware.** P4 +
+  `esp-idf-svc` is currently broken upstream; `esp-hal` has active P4
+  development and avoids the multicore startup / C++ ctor chain that's
+  failing. We trade away the easy `esp_https_ota` path (Phase 0.5 OTA
+  will be hand-rolled) and lvgl-rs std bindings (use `embedded-graphics`
+  / `mipidsi` instead), but boot reliability matters more right now.
+
+  Toolchain side notes (preserved for the esp-hal track too):
+  - Board's USB-UART is a WCH CH343. macOS needs the
+    **CH34xVCPDriver** from the Mac App Store; without it the chip
+    enumerates on the bus but no `/dev/cu.*` appears.
+  - `espflash flash --no-stub` is required for this board (the flash
+    stub bounce fails to connect; direct bootloader works fine).
+  - macOS `cat /dev/cu.*` corrupts the binary console output via the
+    tty layer. Read with PySerial / `python -m serial.tools.miniterm`
+    instead — the "garble" we initially saw via `cat` was a clean
+    crash dump being mangled by the tty.
 - **TLS posture.** Self-signed cert + pinned root for an internal Gilbert? Or trust the system roots and require a real cert? Pick before Phase 1.
 - **OTA channel.** Gilbert as OTA server (signed firmware blobs in entity storage) vs. point at a GitHub release URL? Phase 4 decision.
 - **Multi-tenant.** Can one display serve multiple users (per-user lock-screens) or is it single-user device-only? Probably single-user-per-device for v1; multi-user is a Phase 5+ feature.

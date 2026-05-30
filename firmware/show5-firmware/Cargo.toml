@@ -41,3 +41,15 @@ log = "0.4"
 
 [build-dependencies]
 embuild = "0.33"
+
+# Pull esp-idf-svc / esp-idf-hal / esp-idf-sys from their git master
+# instead of the crates.io releases. The vanilla esp-idf-template ships
+# this same patch block, and for ESP32-P4 it's load-bearing: the
+# crates.io releases predate fixes for P4-specific startup / multicore
+# paths (boot panic at ``cpu_start: Multicore app`` reproduces with the
+# crates.io 0.52 + 0.46 + 0.37 combo even with the right sdkconfig).
+# Drop this once the crates.io releases catch up.
+[patch.crates-io]
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys.git" }
+esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal.git" }
+esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }

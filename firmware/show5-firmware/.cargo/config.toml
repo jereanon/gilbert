@@ -8,15 +8,27 @@ target = "riscv32imafc-esp-espidf"
 # nightly + ``-Z build-std`` to rebuild libstd against the IDF newlib.
 [target.'cfg(target_os = "espidf")']
 linker = "ldproxy"
-runner = "espflash flash --monitor"
+# ``--no-stub`` because the IoTeikXgo board's flash-stub bounce trips
+# (likely a CH343 / auto-reset quirk); direct bootloader works fine and
+# is only marginally slower for our binary size. ``-p`` pins the port so
+# we don't have to retype it. Adjust if you have multiple boards plugged
+# in or are on Linux/Windows.
+runner = "espflash flash --no-stub -p /dev/cu.wchusbserial10 --monitor"
 rustflags = ["--cfg", "espidf_time64"]
 
 [env]
-# ESP-IDF v5.3 was the first release with ESP32-P4 support; v5.4 is the
-# stable choice today. Pin precisely so different machines build the same
-# firmware. embuild caches IDF under ~/.espressif/.
+# ESP-IDF version. v5.5.3 was incompatible with our chip's
+# esp32p4-eco2-20240710 ROM (bootloader's first instruction faulted
+# as illegal). v5.5 (.0) matches the chip and our master-branch
+# esp-idf-svc/hal/sys. v5.4 had the C++ ctor panic in our build;
+# v5.5 is the sweet spot.
 MCU = "esp32p4"
-ESP_IDF_VERSION = "v5.4"
+ESP_IDF_VERSION = "v5.5"
+# Stash IDF + LLVM toolchains inside the project's build dir instead of
+# ~/.espressif. Per-project isolation: different firmware projects can
+# pin different IDF versions without trampling each other; rm -rf
+# .embuild/ to start fresh on this project alone.
+ESP_IDF_TOOLS_INSTALL_DIR = "workspace"
 
 # Defer ESP-IDF + LLVM detection to build time; embuild will pull what's
 # needed and stash it in ~/.espressif.
